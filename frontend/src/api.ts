@@ -38,6 +38,8 @@ import type {
   SchoolLeaveAdminConfig,
   SchoolLeaveAdminSummary,
   SchoolLeaveGroupResult,
+  AdminLeaveRecord,
+  AdminLeaveRecordFilters,
   SchoolLeaveRequest,
   SchoolLeaveRun,
   Task,
@@ -188,6 +190,15 @@ export const api = {
   schoolLeaveAdminConfig: () => request<SchoolLeaveAdminConfig>("/api/school-leave/admin/config"),
   schoolLeaveAdminSummary: () => request<SchoolLeaveAdminSummary>("/api/school-leave/admin/summary"),
   schoolLeaveAdminRequests: () => request<SchoolLeaveRequest[]>("/api/school-leave/admin/requests"),
+  adminLeaveRecords: (filters: AdminLeaveRecordFilters = {}) => {
+    const params = new URLSearchParams()
+    if (filters.name?.trim()) params.set("name", filters.name.trim())
+    if (filters.date_from) params.set("date_from", filters.date_from)
+    if (filters.date_to) params.set("date_to", filters.date_to)
+    if (filters.record_type) params.set("record_type", filters.record_type)
+    const query = params.size ? `?${params.toString()}` : ""
+    return request<AdminLeaveRecord[]>(`/api/school-leave/admin/records${query}`)
+  },
   schoolLeaveRuns: () => request<SchoolLeaveRun[]>("/api/school-leave/admin/runs"),
   collectSchoolLeave: () => request<SchoolLeaveRun | null>("/api/school-leave/admin/runs/collect", { method: "POST" }),
   updateSchoolLeaveRunReason: (runId: number, reason: string) =>

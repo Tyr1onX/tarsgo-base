@@ -3,17 +3,20 @@ import { ref } from "vue"
 
 import DailyLeavePage from "./DailyLeavePage.vue"
 import CampLeavePage from "./CampLeavePage.vue"
+import LegacySchoolLeaveHistory from "./LegacySchoolLeaveHistory.vue"
 import type { Member } from "../types"
 
 const props = defineProps<{ currentUser: Member }>()
 const emit = defineEmits<{ navigate: [path: string]; todoCount: [count: number] }>()
-const activeSection = ref<"daily" | "camp">("daily")
+const activeSection = ref<"daily" | "camp" | "records">("daily")
+const isAdmin = props.currentUser.role === "admin"
 </script>
 
 <template>
   <nav class="leave-kind-tabs" aria-label="请假类型">
     <button type="button" :class="{ active: activeSection === 'daily' }" @click="activeSection = 'daily'">日常请假</button>
     <button type="button" :class="{ active: activeSection === 'camp' }" @click="activeSection = 'camp'">集中请假</button>
+    <button v-if="isAdmin" type="button" :class="{ active: activeSection === 'records' }" @click="activeSection = 'records'">请假记录</button>
   </nav>
 
   <template v-if="activeSection === 'daily'">
@@ -24,9 +27,13 @@ const activeSection = ref<"daily" | "camp">("daily")
       @todo-count="emit('todoCount', $event)"
     />
   </template>
-  <template v-else>
+  <template v-else-if="activeSection === 'camp'">
     <div class="page-title leave-page-title"><h1>集中请假</h1></div>
     <CampLeavePage :current-user="props.currentUser" @navigate="emit('navigate', $event)" />
+  </template>
+  <template v-else-if="isAdmin">
+    <div class="page-title leave-page-title"><h1>请假记录</h1></div>
+    <LegacySchoolLeaveHistory :current-user="props.currentUser" />
   </template>
 </template>
 

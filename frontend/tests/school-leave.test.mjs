@@ -15,6 +15,8 @@ assert.match(leavePage, /日常请假/)
 assert.match(leavePage, /集中请假/)
 assert.match(leavePage, /<DailyLeavePage/)
 assert.match(leavePage, /<CampLeavePage/)
+assert.match(leavePage, /v-if="isAdmin"[^>]*>请假记录/)
+assert.match(leavePage, /<LegacySchoolLeaveHistory :current-user="props\.currentUser"/)
 
 // Internal members enter only the interval; identity comes from their profile.
 assert.match(dailyPage, /生成请假条/)
@@ -67,16 +69,24 @@ assert.match(app, /routePath\.startsWith\("\/leave\/daily\/"\)/)
 assert.match(app, /path\.startsWith\('\/leave\/daily\/'\)/)
 assert.match(app, /<DailyLeavePublicPage :token="dailyLeavePublicToken"/)
 
-// The old history UI is removed, while read/download APIs and the legacy component remain available.
+// Admins can search one unified view; generated documents are clearly not approval records.
 assert.doesNotMatch(dailyPage, /LegacySchoolLeaveHistory|legacyExpanded|旧版日常请假历史|查看历史（只读）/)
-assert.match(legacyPage, /schoolLeaveRuns\(\)/)
-assert.match(legacyPage, /schoolLeaveRequests\(\)/)
-assert.match(legacyPage, /downloadLegacySchoolLeaveRunDocument/)
-assert.match(legacyPage, /downloadLegacySchoolLeaveGroupDocument/)
+assert.match(legacyPage, /adminLeaveRecords\(/)
+assert.match(legacyPage, /name: nameFilter\.value/)
+assert.match(legacyPage, /date_from: dateFrom\.value/)
+assert.match(legacyPage, /date_to: dateTo\.value/)
+assert.match(legacyPage, /record_type: recordType\.value/)
+assert.match(legacyPage, /请假条生成记录只表示材料已生成或提交，不代表请假已获批准/)
+assert.match(legacyPage, /个人自助生成/)
+assert.match(legacyPage, /共享活动生成/)
+assert.match(legacyPage, /正式请假申请/)
+assert.match(api, /adminLeaveRecords: \(filters: AdminLeaveRecordFilters/)
+assert.match(api, /\/api\/school-leave\/admin\/records/)
 assert.match(api, /schoolLeaveRequests/)
 assert.match(api, /schoolLeaveRuns/)
 assert.match(api, /\/api\/school-leave\/admin\/runs\/.*\/history-document/)
 assert.match(types, /SchoolLeaveRunStatus = "ready" \| "awaiting_return" \| "completed" \| "cancelled"/)
+assert.match(types, /AdminLeaveRecordType = "generated" \| "formal_application"/)
 
 // Keep both pages usable on narrow phones without fixed-width containers.
 for (const page of [dailyPage, publicPage, leavePage]) {

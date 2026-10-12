@@ -6,14 +6,14 @@ import hashlib
 import io
 import os
 import zipfile
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from docx import Document
 from fastapi.testclient import TestClient
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text
 
 from app.auth import get_current_member
 from app.db import SessionLocal, get_db
@@ -64,6 +64,7 @@ def main() -> None:
     os.environ["LEAVE_CONTACT_PHONE"] = "000-0000-0000"
 
     with SessionLocal() as db:
+        assert db.scalar(text("SELECT @@session.time_zone")) == "+00:00"
         admin = Member(name="V2 测试管理员", email=admin_email, role="admin", status="active")
         formal = Member(
             name="正式成员甲",
@@ -480,19 +481,159 @@ def main() -> None:
             db.add(legacy_run)
             db.flush()
             legacy_run_ids.add(legacy_run.id)
-            db.add(
-                SchoolLeaveRequest(
-                    member_id=admin.id,
-                    start_at=now + timedelta(days=1),
-                    end_at=now + timedelta(days=1, hours=2),
-                    member_name_snapshot="历史申请人",
-                    student_id_snapshot="26000290",
-                    status="included",
-                    run_id=legacy_run.id,
-                )
+            legacy_request = SchoolLeaveRequest(
+                member_id=admin.id,
+                start_at=now + timedelta(days=1),
+                end_at=now + timedelta(days=1, hours=2),
+                member_name_snapshot="历史申请人",
+                student_id_snapshot="26000290",
+                status="included",
+                run_id=legacy_run.id,
+            )
+            db.add(legacy_request)
+
+            # An interval ending exactly at the selected day's midnight does not overlap that day.
+            boundary_start = datetime.combine(
+                (now + timedelta(days=5)).date(), datetime.min.time()
+            )
+            boundary_window = DailyLeaveWindow(
+                title="边界共享活动",
+                start_at=boundary_start - timedelta(hours=2),
+                end_at=boundary_start,
+                open_until=boundary_start,
+                team_open=True,
+                public_enabled=False,
+                status="closed",
+                created_by=admin.id,
+            )
+            db.add(boundary_window)
+            db.flush()
+            window_ids.add(boundary_window.id)
+            db.add_all(
+                [
+                    DailyLeaveEntry(
+                        window_id=None,
+                        member_id=formal.id,
+                        start_at=boundary_start - timedelta(hours=1),
+                        end_at=boundary_start,
+                        name_snapshot="边界生成成员",
+                        student_id_snapshot="26000231",
+                        college_snapshot="electronic-science-engineering",
+                        participant_type="formal",
+                    ),
+                    DailyLeaveEntry(
+                        window_id=boundary_window.id,
+                        member_id=formal.id,
+                        start_at=None,
+                        end_at=None,
+                        name_snapshot="边界共享成员",
+                        student_id_snapshot="26000233",
+                        college_snapshot="electronic-science-engineering",
+                        participant_type="formal",
+                    ),
+                    SchoolLeaveRequest(
+                        member_id=formal.id,
+                        start_at=boundary_start - timedelta(hours=1),
+                        end_at=boundary_start,
+                        member_name_snapshot="边界正式申请人",
+                        student_id_snapshot="26000232",
+                    ),
+                ]
             )
             db.commit()
+            db.refresh(legacy_request)
+            set_actor(formal)
+            assert client.get("/api/school-leave/admin/records").status_code == 403
+
             set_actor(admin)
+            unified_records = client.get("/api/school-leave/admin/records")
+            assert unified_records.status_code == 200, unified_records.text
+            generated_rows = [
+                row for row in unified_records.json()
+                if row["name"] == "正式成员甲" and row["record_type"] == "generated"
+            ]
+            assert any(row["source_type"] == "self_service" for row in generated_rows)
+            self_service_row = next(
+                row for row in generated_rows if row["id"] == f"generated:{standalone_entry.id}"
+            )
+            self_service_recorded_at = datetime.fromisoformat(self_service_row["recorded_at"])
+            expected_self_service_time = (
+                standalone_entry.submitted_at.replace(tzinfo=timezone.utc)
+                .astimezone(TZ)
+                .replace(tzinfo=None)
+            )
+            assert self_service_recorded_at == expected_self_service_time
+
+            shared_entry = db.scalar(
+                select(DailyLeaveEntry).where(
+                    DailyLeaveEntry.window_id == window_id,
+                    DailyLeaveEntry.member_id == formal.id,
+                )
+            )
+            assert shared_entry is not None
+            shared_row = next(
+                row for row in unified_records.json()
+                if row["source_type"] == "shared_activity"
+                and row["activity_title"] == window_payload["title"]
+                and row["student_id"] == "26000201"
+            )
+            assert shared_row["start_at"].startswith(window_payload["start_at"])
+            assert shared_row["record_type"] == "generated"
+            assert shared_row["application_status"] is None
+            shared_recorded_at = datetime.fromisoformat(shared_row["recorded_at"])
+            expected_shared_time = (
+                shared_entry.submitted_at.replace(tzinfo=timezone.utc)
+                .astimezone(TZ)
+                .replace(tzinfo=None)
+            )
+            assert shared_recorded_at == expected_shared_time
+
+            legacy_records = client.get(
+                "/api/school-leave/admin/records",
+                params={
+                    "name": "历史申请人",
+                    "date_from": (now + timedelta(days=1)).date().isoformat(),
+                    "date_to": (now + timedelta(days=1)).date().isoformat(),
+                    "record_type": "formal_application",
+                },
+            )
+            assert legacy_records.status_code == 200, legacy_records.text
+            assert len(legacy_records.json()) == 1
+            legacy_record = legacy_records.json()[0]
+            assert legacy_record["record_type"] == "formal_application"
+            assert legacy_record["source_type"] == "legacy_application"
+            assert legacy_record["application_status"] == "included"
+            assert legacy_record["activity_title"] == "legacy history fixture"
+            assert legacy_record["activity_at"] is not None
+            legacy_recorded_at = datetime.fromisoformat(legacy_record["recorded_at"])
+            expected_legacy_time = (
+                legacy_request.created_at.replace(tzinfo=timezone.utc)
+                .astimezone(TZ)
+                .replace(tzinfo=None)
+            )
+            assert legacy_recorded_at == expected_legacy_time
+
+            for boundary_name, boundary_type in (
+                ("边界生成成员", "generated"),
+                ("边界共享成员", "generated"),
+                ("边界正式申请人", "formal_application"),
+            ):
+                boundary_response = client.get(
+                    "/api/school-leave/admin/records",
+                    params={
+                        "name": boundary_name,
+                        "date_from": boundary_start.date().isoformat(),
+                        "record_type": boundary_type,
+                    },
+                )
+                assert boundary_response.status_code == 200, boundary_response.text
+                assert boundary_response.json() == []
+
+            assert client.get(
+                "/api/school-leave/admin/records",
+                params={"date_from": "2026-10-10", "date_to": "2026-10-09"},
+            ).status_code == 422
+
             history_list = client.get("/api/school-leave/admin/runs")
             assert history_list.status_code == 200
             assert any(run["id"] == legacy_run.id for run in history_list.json())
@@ -514,7 +655,13 @@ def main() -> None:
                 db.execute(delete(CampLeaveParticipant).where(CampLeaveParticipant.event_id.in_(event_ids)))
                 db.execute(delete(CampLeaveEvent).where(CampLeaveEvent.id.in_(event_ids)))
             if legacy_run_ids:
-                db.execute(delete(SchoolLeaveRequest).where(SchoolLeaveRequest.run_id.in_(legacy_run_ids)))
+                db.execute(
+                    delete(SchoolLeaveRequest).where(
+                        SchoolLeaveRequest.member_id.in_(
+                            [admin.id, formal.id, reserve.id, unassigned.id, incomplete.id]
+                        )
+                    )
+                )
                 db.execute(delete(SchoolLeaveRun).where(SchoolLeaveRun.id.in_(legacy_run_ids)))
             db.execute(delete(Member).where(Member.email.in_([admin_email, formal_email, reserve_email, unassigned_email, incomplete_email])))
             db.commit()
