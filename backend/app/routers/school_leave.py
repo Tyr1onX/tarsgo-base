@@ -1,17 +1,27 @@
 from __future__ import annotations
 
 import io
+from datetime import date, datetime, time, timedelta
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse, StreamingResponse
-from sqlalchemy import delete, func, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from ..auth import get_current_member, require_admin
 from ..db import get_db
-from ..models import Member, SchoolLeaveGroupResult, SchoolLeaveRequest, SchoolLeaveRun
+from ..models import (
+    DailyLeaveEntry,
+    DailyLeaveWindow,
+    Member,
+    SchoolLeaveGroupResult,
+    SchoolLeaveRequest,
+    SchoolLeaveRun,
+)
 from ..schemas import (
+    AdminLeaveRecordOut,
+    AdminLeaveRecordType,
     MemberSummary,
     SchoolLeaveAdminConfigOut,
     SchoolLeaveAdminSummaryOut,
@@ -308,6 +318,108 @@ def admin_list_requests(
         )
     )
     return [_request_out(request) for request in requests]
+
+
+@router.get("/admin/records", response_model=list[AdminLeaveRecordOut])
+def admin_list_leave_records(
+    name: str | None = Query(default=None, max_length=100),
+    date_from: date | None = None,
+    date_to: date | None = None,
+    record_type: AdminLeaveRecordType | None = None,
+    _: Member = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> list[AdminLeaveRecordOut]:
+    """Read the member-facing daily leave history without changing source records."""
+    search_name = (name or "").strip()
+    if date_from is not None and date_to is not None and date_from > date_to:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="开始日期不能晚于结束日期")
+    if date_to == date.max:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="结束日期超出可查询范围")
+
+    lower_bound = datetime.combine(date_from, time.min) if date_from is not None else None
+    upper_bound = datetime.combine(date_to + timedelta(days=1), time.min) if date_to is not None else None
+    search_pattern = None
+    if search_name:
+        escaped_name = search_name.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        search_pattern = f"%{escaped_name}%"
+    records: list[AdminLeaveRecordOut] = []
+
+    if record_type in (None, "generated"):
+        generated_filters = []
+        if search_pattern is not None:
+            generated_filters.append(DailyLeaveEntry.name_snapshot.ilike(search_pattern, escape="\\"))
+        if lower_bound is not None:
+            generated_filters.append(
+                or_(
+                    and_(DailyLeaveEntry.window_id.is_(None), DailyLeaveEntry.end_at >= lower_bound),
+                    and_(DailyLeaveEntry.window_id.is_not(None), DailyLeaveWindow.end_at >= lower_bound),
+                )
+            )
+        if upper_bound is not None:
+            generated_filters.append(
+                or_(
+                    and_(DailyLeaveEntry.window_id.is_(None), DailyLeaveEntry.start_at < upper_bound),
+                    and_(DailyLeaveEntry.window_id.is_not(None), DailyLeaveWindow.start_at < upper_bound),
+                )
+            )
+        generated_rows = db.execute(
+            select(DailyLeaveEntry, DailyLeaveWindow)
+            .outerjoin(DailyLeaveWindow, DailyLeaveWindow.id == DailyLeaveEntry.window_id)
+            .where(*generated_filters)
+        ).all()
+        for entry, window in generated_rows:
+            start_at = window.start_at if window is not None else entry.start_at
+            end_at = window.end_at if window is not None else entry.end_at
+            if start_at is None or end_at is None:
+                continue
+            is_shared = window is not None
+            records.append(
+                AdminLeaveRecordOut(
+                    id=f"generated:{entry.id}",
+                    name=entry.name_snapshot,
+                    student_id=entry.student_id_snapshot,
+                    start_at=start_at,
+                    end_at=end_at,
+                    recorded_at=entry.submitted_at,
+                    record_type="generated",
+                    source_type="shared_activity" if is_shared else "self_service",
+                    activity_title=window.title if window is not None else None,
+                )
+            )
+
+    if record_type in (None, "formal_application"):
+        request_filters = []
+        if search_pattern is not None:
+            request_filters.append(SchoolLeaveRequest.member_name_snapshot.ilike(search_pattern, escape="\\"))
+        if lower_bound is not None:
+            request_filters.append(SchoolLeaveRequest.end_at >= lower_bound)
+        if upper_bound is not None:
+            request_filters.append(SchoolLeaveRequest.start_at < upper_bound)
+        request_rows = db.execute(
+            select(SchoolLeaveRequest, SchoolLeaveRun)
+            .outerjoin(SchoolLeaveRun, SchoolLeaveRun.id == SchoolLeaveRequest.run_id)
+            .where(*request_filters)
+        ).all()
+        for request, run in request_rows:
+            records.append(
+                AdminLeaveRecordOut(
+                    id=f"application:{request.id}",
+                    name=request.member_name_snapshot,
+                    student_id=request.student_id_snapshot,
+                    start_at=request.start_at,
+                    end_at=request.end_at,
+                    recorded_at=request.created_at,
+                    record_type="formal_application",
+                    source_type="legacy_application",
+                    activity_title=run.reason if run is not None else None,
+                    activity_at=run.collected_at if run is not None else None,
+                    application_status=request.status,
+                    summary_status=run.status if run is not None else None,
+                )
+            )
+
+    records.sort(key=lambda record: (record.recorded_at, record.id), reverse=True)
+    return records
 
 
 @router.get("/admin/runs", response_model=list[SchoolLeaveRunOut])

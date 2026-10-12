@@ -492,7 +492,49 @@ def main() -> None:
                 )
             )
             db.commit()
+            set_actor(formal)
+            assert client.get("/api/school-leave/admin/records").status_code == 403
+
             set_actor(admin)
+            unified_records = client.get("/api/school-leave/admin/records")
+            assert unified_records.status_code == 200, unified_records.text
+            generated_rows = [
+                row for row in unified_records.json()
+                if row["name"] == "正式成员甲" and row["record_type"] == "generated"
+            ]
+            assert any(row["source_type"] == "self_service" for row in generated_rows)
+            shared_row = next(
+                row for row in unified_records.json()
+                if row["source_type"] == "shared_activity"
+                and row["activity_title"] == window_payload["title"]
+                and row["student_id"] == "26000201"
+            )
+            assert shared_row["start_at"].startswith(window_payload["start_at"])
+            assert shared_row["record_type"] == "generated"
+            assert shared_row["application_status"] is None
+
+            legacy_records = client.get(
+                "/api/school-leave/admin/records",
+                params={
+                    "name": "历史申请人",
+                    "date_from": (now + timedelta(days=1)).date().isoformat(),
+                    "date_to": (now + timedelta(days=1)).date().isoformat(),
+                    "record_type": "formal_application",
+                },
+            )
+            assert legacy_records.status_code == 200, legacy_records.text
+            assert len(legacy_records.json()) == 1
+            legacy_record = legacy_records.json()[0]
+            assert legacy_record["record_type"] == "formal_application"
+            assert legacy_record["source_type"] == "legacy_application"
+            assert legacy_record["application_status"] == "included"
+            assert legacy_record["activity_title"] == "legacy history fixture"
+            assert legacy_record["activity_at"] is not None
+            assert client.get(
+                "/api/school-leave/admin/records",
+                params={"date_from": "2026-10-10", "date_to": "2026-10-09"},
+            ).status_code == 422
+
             history_list = client.get("/api/school-leave/admin/runs")
             assert history_list.status_code == 200
             assert any(run["id"] == legacy_run.id for run in history_list.json())

@@ -14,6 +14,8 @@ TaskKind = Literal["item", "task"]
 SchoolLeaveRequestStatus = Literal["pending", "included", "withdrawn"]
 SchoolLeaveRunStatus = Literal["ready", "awaiting_return", "completed", "cancelled"]
 SchoolLeaveResultState = Literal["available", "cleared"]
+AdminLeaveRecordType = Literal["generated", "formal_application"]
+AdminLeaveRecordSource = Literal["self_service", "shared_activity", "legacy_application"]
 CampLeaveType = Literal["winter", "summer"]
 CampLeaveStatus = Literal["collecting", "closed"]
 CampLeaveParticipantType = Literal["formal", "reserve", "other"]
@@ -270,6 +272,21 @@ class SchoolLeaveRequestOut(BaseModel):
     result_state: SchoolLeaveResultState | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class AdminLeaveRecordOut(BaseModel):
+    id: str
+    name: str
+    student_id: str
+    start_at: datetime
+    end_at: datetime
+    recorded_at: datetime
+    record_type: AdminLeaveRecordType
+    source_type: AdminLeaveRecordSource
+    activity_title: str | None = None
+    activity_at: datetime | None = None
+    application_status: SchoolLeaveRequestStatus | None = None
+    summary_status: SchoolLeaveRunStatus | None = None
 
 
 def _normalize_daily_leave_datetime(value: datetime) -> datetime:

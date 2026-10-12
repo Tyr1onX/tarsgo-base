@@ -2,154 +2,194 @@
 import { onMounted, ref } from "vue"
 
 import { api } from "../api"
-import type { Member, SchoolLeaveRequest, SchoolLeaveRun } from "../types"
+import type { AdminLeaveRecord, AdminLeaveRecordType, Member } from "../types"
 
 const props = defineProps<{ currentUser: Member }>()
-const requests = ref<SchoolLeaveRequest[]>([])
-const runs = ref<SchoolLeaveRun[]>([])
-const loading = ref(true)
-const error = ref("")
-const downloading = ref<number | null>(null)
-
+const records = ref<AdminLeaveRecord[]>([])
 const isAdmin = props.currentUser.role === "admin"
+const loading = ref(isAdmin)
+const error = ref("")
+const nameFilter = ref("")
+const dateFrom = ref("")
+const dateTo = ref("")
+const recordType = ref<AdminLeaveRecordType | "">("")
 
 function dateTime(value: string) {
   return value.slice(0, 16).replace("T", " ")
 }
 
-function statusLabel(run: SchoolLeaveRun) {
-  if (run.status === "completed") return "已完成"
-  if (run.status === "awaiting_return") return "回传处理中"
-  if (run.status === "ready") return "待下载"
-  return "已取消"
+function recordTypeLabel(record: AdminLeaveRecord) {
+  return record.record_type === "generated" ? "请假条生成记录" : "正式请假申请"
 }
 
-async function load() {
+function sourceLabel(record: AdminLeaveRecord) {
+  if (record.source_type === "self_service") return "个人自助生成"
+  if (record.source_type === "shared_activity") return "共享活动生成"
+  return "旧版日常申请"
+}
+
+function applicationStatusLabel(status: AdminLeaveRecord["application_status"]) {
+  if (status === "pending") return "待汇总"
+  if (status === "included") return "已纳入汇总"
+  if (status === "withdrawn") return "已撤回"
+  return ""
+}
+
+function summaryStatusLabel(status: AdminLeaveRecord["summary_status"]) {
+  if (status === "ready") return "待下载"
+  if (status === "awaiting_return") return "回传处理中"
+  if (status === "completed") return "已完成"
+  if (status === "cancelled") return "已取消"
+  return ""
+}
+
+async function loadRecords() {
+  if (!isAdmin) return
   loading.value = true
   error.value = ""
   try {
-    if (isAdmin) runs.value = await api.schoolLeaveRuns()
-    else requests.value = await api.schoolLeaveRequests()
+    records.value = await api.adminLeaveRecords({
+      name: nameFilter.value,
+      date_from: dateFrom.value,
+      date_to: dateTo.value,
+      record_type: recordType.value || undefined,
+    })
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : "历史记录加载失败"
+    records.value = []
+    error.value = reason instanceof Error ? reason.message : "请假记录加载失败"
   } finally {
     loading.value = false
   }
 }
 
-function openResult(runId: number, groupIndex: number) {
-  window.open(api.schoolLeaveResultUrl(runId, groupIndex), "_blank", "noopener")
-}
-
-async function downloadRun(run: SchoolLeaveRun) {
-  downloading.value = run.id
-  error.value = ""
-  try {
-    const file = await api.downloadLegacySchoolLeaveRunDocument(run.id)
-    const url = URL.createObjectURL(file.blob)
-    const anchor = document.createElement("a")
-    anchor.href = url
-    anchor.download = file.filename
-    document.body.appendChild(anchor)
-    anchor.click()
-    anchor.remove()
-    URL.revokeObjectURL(url)
-  } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : "下载失败"
-  } finally {
-    downloading.value = null
+function applyFilters() {
+  if (dateFrom.value && dateTo.value && dateFrom.value > dateTo.value) {
+    records.value = []
+    error.value = "开始日期不能晚于结束日期"
+    return
   }
+  void loadRecords()
 }
 
-async function downloadGroup(runId: number, groupIndex: number) {
-  downloading.value = runId
-  error.value = ""
-  try {
-    const file = await api.downloadLegacySchoolLeaveGroupDocument(runId, groupIndex)
-    const url = URL.createObjectURL(file.blob)
-    const anchor = document.createElement("a")
-    anchor.href = url
-    anchor.download = file.filename
-    document.body.appendChild(anchor)
-    anchor.click()
-    anchor.remove()
-    URL.revokeObjectURL(url)
-  } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : "下载失败"
-  } finally {
-    downloading.value = null
-  }
+function resetFilters() {
+  nameFilter.value = ""
+  dateFrom.value = ""
+  dateTo.value = ""
+  recordType.value = ""
+  void loadRecords()
 }
 
-onMounted(load)
+onMounted(() => {
+  void loadRecords()
+})
 </script>
 
 <template>
-  <section class="legacy-leave-history" aria-label="旧版日常请假历史">
-    <p v-if="error" class="legacy-leave-error" role="alert">{{ error }}</p>
-    <p v-if="loading" class="legacy-leave-muted" role="status">正在加载历史记录…</p>
-    <template v-else-if="isAdmin">
-      <p v-if="!runs.length" class="legacy-leave-muted">暂无旧版历史记录。</p>
-      <article v-for="run in runs" :key="run.id" class="legacy-leave-run">
-        <div class="legacy-leave-run-heading">
-          <strong>{{ dateTime(run.collected_at) }} · {{ statusLabel(run) }}</strong>
-          <button
-            v-if="run.document_ready && run.status !== 'cancelled'"
-            class="text-action"
-            type="button"
-            :disabled="downloading === run.id"
-            @click="downloadRun(run)"
-          >{{ downloading === run.id ? "准备中…" : "下载原汇总 DOCX" }}</button>
-        </div>
-        <p class="legacy-leave-muted">{{ run.request_count }} 条历史申请 · {{ run.groups.length }} 个时间组</p>
-        <div v-for="group in run.groups" :key="group.index" class="legacy-leave-group">
-          <div class="legacy-leave-group-heading">
-            <span>{{ dateTime(group.start_at) }} 至 {{ dateTime(group.end_at) }} · {{ group.count }} 人</span>
-            <button
-              v-if="run.status !== 'cancelled'"
-              class="text-action"
-              type="button"
-              :disabled="downloading === run.id"
-              @click="downloadGroup(run.id, group.index)"
-            >下载此组 DOCX</button>
-          </div>
-          <div v-for="person in group.members" :key="person.member_id" class="legacy-leave-person">
-            <span>{{ person.name }} · {{ person.student_id }}</span>
-            <button
-              v-if="group.result?.available"
-              class="text-action"
-              type="button"
-              @click="openResult(run.id, group.index)"
-            >下载历史回传材料</button>
-          </div>
-        </div>
-      </article>
-    </template>
-    <template v-else>
-      <p v-if="!requests.length" class="legacy-leave-muted">暂无旧版历史记录。</p>
-      <div v-for="item in requests" :key="item.id" class="legacy-leave-member-row">
-        <span>{{ dateTime(item.start_at) }} 至 {{ dateTime(item.end_at) }} · {{ item.status === "withdrawn" ? "已撤回" : item.run_status === "completed" ? "已完成" : "已汇总" }}</span>
-        <button
-          v-if="item.run_id !== null && item.group_index !== null && item.result_state === 'available'"
-          class="text-action"
-          type="button"
-          @click="openResult(item.run_id, item.group_index)"
-        >下载历史回传材料</button>
+  <section class="legacy-leave-history" aria-label="成员请假记录">
+    <p class="leave-records-note">
+      请假条生成记录只表示材料已生成或提交，不代表请假已获批准。正式申请状态显示申请及旧版汇总进度。
+    </p>
+
+    <form class="leave-record-filters" @submit.prevent="applyFilters">
+      <label>
+        <span>成员姓名</span>
+        <input v-model="nameFilter" type="search" maxlength="100" placeholder="搜索姓名" />
+      </label>
+      <label>
+        <span>请假日期从</span>
+        <input v-model="dateFrom" type="date" />
+      </label>
+      <label>
+        <span>请假日期到</span>
+        <input v-model="dateTo" type="date" />
+      </label>
+      <label>
+        <span>记录类型</span>
+        <select v-model="recordType">
+          <option value="">全部类型</option>
+          <option value="generated">请假条生成记录</option>
+          <option value="formal_application">正式请假申请</option>
+        </select>
+      </label>
+      <div class="leave-record-filter-actions">
+        <button class="primary" type="submit" :disabled="loading">{{ loading ? "查询中…" : "筛选" }}</button>
+        <button class="text-action" type="button" :disabled="loading" @click="resetFilters">重置</button>
       </div>
-    </template>
+    </form>
+
+    <p v-if="error" class="leave-record-error" role="alert">{{ error }}</p>
+    <p v-if="loading" class="leave-record-muted" role="status">正在加载请假记录…</p>
+    <p v-else-if="!records.length" class="leave-record-muted">没有符合条件的请假记录。</p>
+    <p v-else class="leave-record-muted">共 {{ records.length }} 条记录</p>
+
+    <div v-if="!loading && records.length" class="leave-record-list">
+      <article v-for="record in records" :key="record.id" class="leave-record-card">
+        <div class="leave-record-heading">
+          <strong>{{ record.name }}</strong>
+          <span class="leave-record-student-id">学号 {{ record.student_id }}</span>
+        </div>
+        <div class="leave-record-tags">
+          <span class="leave-record-type">{{ recordTypeLabel(record) }}</span>
+          <span>{{ sourceLabel(record) }}</span>
+        </div>
+        <dl class="leave-record-details">
+          <div>
+            <dt>请假时间</dt>
+            <dd>{{ dateTime(record.start_at) }} 至 {{ dateTime(record.end_at) }}</dd>
+          </div>
+          <div>
+            <dt>{{ record.record_type === "generated" ? "生成记录时间" : "提交时间" }}</dt>
+            <dd>{{ dateTime(record.recorded_at) }}</dd>
+          </div>
+          <div v-if="record.activity_title">
+            <dt>{{ record.source_type === "shared_activity" ? "关联活动" : "关联旧版汇总" }}</dt>
+            <dd>{{ record.activity_title }}</dd>
+          </div>
+          <div v-if="record.activity_at">
+            <dt>汇总时间</dt>
+            <dd>{{ dateTime(record.activity_at) }}</dd>
+          </div>
+          <div v-if="record.application_status">
+            <dt>申请状态</dt>
+            <dd>{{ applicationStatusLabel(record.application_status) }}</dd>
+          </div>
+          <div v-if="record.summary_status">
+            <dt>汇总状态</dt>
+            <dd>{{ summaryStatusLabel(record.summary_status) }}</dd>
+          </div>
+        </dl>
+      </article>
+    </div>
   </section>
 </template>
 
 <style scoped>
 .legacy-leave-history { min-width: 0; }
-.legacy-leave-muted { margin: 7px 0; color: var(--faint); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
-.legacy-leave-error { margin: 7px 0; color: var(--danger); font-size: 12px; }
-.legacy-leave-run { min-width: 0; padding: 11px 0; border-top: 1px solid var(--line); }
-.legacy-leave-run-heading, .legacy-leave-group-heading, .legacy-leave-member-row, .legacy-leave-person { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; min-width: 0; }
-.legacy-leave-run-heading strong { font-size: 13px; font-weight: 560; }
-.legacy-leave-run-heading button, .legacy-leave-group-heading button, .legacy-leave-person button, .legacy-leave-member-row button { flex: 0 0 auto; padding: 2px 0; }
-.legacy-leave-group { padding: 7px 0 0; }
-.legacy-leave-group-heading, .legacy-leave-person, .legacy-leave-member-row { padding: 6px 0; border-top: 1px solid var(--line); font-size: 12px; overflow-wrap: anywhere; }
-.legacy-leave-person span, .legacy-leave-member-row span { min-width: 0; overflow-wrap: anywhere; }
-@media (max-width: 420px) { .legacy-leave-run-heading, .legacy-leave-group-heading, .legacy-leave-member-row, .legacy-leave-person { align-items: flex-start; } }
+.leave-records-note { margin: 0 0 14px; color: var(--muted); font-size: 12px; line-height: 1.55; }
+.leave-record-filters { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px 12px; align-items: end; margin-bottom: 14px; }
+.leave-record-filters label { display: grid; min-width: 0; gap: 5px; color: var(--muted); font-size: 12px; }
+.leave-record-filters input, .leave-record-filters select { box-sizing: border-box; width: 100%; min-width: 0; }
+.leave-record-filter-actions { display: flex; align-items: center; gap: 12px; min-height: 36px; }
+.leave-record-filter-actions button { white-space: nowrap; }
+.leave-record-muted { margin: 8px 0; color: var(--faint); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.leave-record-error { margin: 8px 0; color: var(--danger); font-size: 12px; }
+.leave-record-list { display: grid; gap: 9px; }
+.leave-record-card { min-width: 0; padding: 13px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+.leave-record-heading { display: flex; flex-wrap: wrap; align-items: baseline; gap: 5px 12px; }
+.leave-record-heading strong { font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+.leave-record-student-id { color: var(--muted); font-size: 12px; }
+.leave-record-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; color: var(--muted); font-size: 11px; }
+.leave-record-tags span { padding: 3px 7px; border-radius: 999px; background: var(--surface-raised, var(--line)); }
+.leave-record-tags .leave-record-type { color: var(--text); font-weight: 560; }
+.leave-record-details { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px 18px; margin: 11px 0 0; }
+.leave-record-details div { min-width: 0; }
+.leave-record-details dt { margin-bottom: 3px; color: var(--faint); font-size: 11px; }
+.leave-record-details dd { margin: 0; color: var(--text); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+@media (max-width: 680px) {
+  .leave-record-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 420px) {
+  .leave-record-filters { grid-template-columns: minmax(0, 1fr); }
+  .leave-record-details { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+}
 </style>

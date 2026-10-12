@@ -193,6 +193,31 @@ export interface SchoolLeaveRequest {
   updated_at: string
 }
 
+export type AdminLeaveRecordType = "generated" | "formal_application"
+export type AdminLeaveRecordSource = "self_service" | "shared_activity" | "legacy_application"
+
+export interface AdminLeaveRecord {
+  id: string
+  name: string
+  student_id: string
+  start_at: string
+  end_at: string
+  recorded_at: string
+  record_type: AdminLeaveRecordType
+  source_type: AdminLeaveRecordSource
+  activity_title: string | null
+  activity_at: string | null
+  application_status: SchoolLeaveRequestStatus | null
+  summary_status: SchoolLeaveRunStatus | null
+}
+
+export interface AdminLeaveRecordFilters {
+  name?: string
+  date_from?: string
+  date_to?: string
+  record_type?: AdminLeaveRecordType
+}
+
 export interface SchoolLeaveGroupMember {
   member_id: number
   name: string
