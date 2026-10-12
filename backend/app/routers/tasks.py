@@ -62,6 +62,8 @@ def _fact_query():
 
 
 def _visible_facts(db: Session, root: Task, current: Member, task_id: int | None) -> list[ItemFact]:
+    if root.kind != "item":
+        return []
     query = _fact_query().where(ItemFact.root_task_id == root.id, ItemFact.is_active.is_(True))
     if _is_admin(current) or root.owner_id == current.id:
         return list(db.scalars(query.order_by(ItemFact.created_at.asc(), ItemFact.id.asc())).unique().all())
@@ -119,6 +121,7 @@ def _task_out(task: Task, db: Session | None = None, current: Member | None = No
     item_facts = [_fact_out(fact) for fact in facts]
     return TaskOut(
         id=task.id,
+        kind=task.kind,
         parent_id=task.parent_id,
         title=task.title,
         deliverable=task.deliverable,
@@ -218,6 +221,8 @@ def _can_write_item(db: Session, root: Task, current: Member) -> bool:
 
 
 def _require_item_writer(db: Session, root: Task, current: Member) -> None:
+    if root.kind != "item":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="独立任务不支持事项信息")
     if not _can_write_item(db, root, current):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="只有事项参与者可以更新事项信息")
 
@@ -299,7 +304,7 @@ def _create_item_fact(
 
 def sync_root_status(db: Session, root_id: int) -> None:
     root = db.scalar(select(Task).where(Task.id == root_id).with_for_update())
-    if root is None or root.parent_id is not None:
+    if root is None or root.parent_id is not None or root.kind != "item":
         return
     statuses = list(db.scalars(select(Task.status).where(Task.parent_id == root.id)).all())
     if not statuses:
@@ -374,7 +379,7 @@ def _validate_parent(db: Session, parent_id: int | None) -> None:
     parent = db.get(Task, parent_id)
     if not parent:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="父事项不存在")
-    if parent.parent_id is not None:
+    if parent.parent_id is not None or parent.kind != "item":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="当前阶段只支持一级分工")
 
 
@@ -386,6 +391,9 @@ def _validate_owner_state(owner_id: int | None, owner_claimable: bool) -> None:
 def _build_task(db: Session, payload: TaskCreate, current: Member) -> Task:
     _validate_parent(db, payload.parent_id)
     _validate_owner_state(payload.owner_id, payload.owner_claimable)
+    if payload.parent_id is not None and payload.kind not in (None, "task"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="事项不能作为分工创建")
+    task_kind = "task" if payload.parent_id is not None else payload.kind or "item"
 
     member_ids = set(payload.collaborator_ids)
     if payload.owner_id is not None:
@@ -393,6 +401,7 @@ def _build_task(db: Session, payload: TaskCreate, current: Member) -> Task:
     members = _load_active_members(db, member_ids)
 
     task = Task(
+        kind=task_kind,
         parent_id=payload.parent_id,
         title=payload.title,
         deliverable=payload.deliverable,
@@ -480,6 +489,9 @@ def _visible_activity_query(
 ):
     query = _activity_query().where(ItemActivity.root_task_id == root.id)
     if not _is_admin(current) and root.owner_id != current.id:
+        if root.kind == "task":
+            participant = task_id in (None, root.id) and _can_write_task_progress(root, current)
+            return query.where(ItemActivity.task_id == root.id) if participant else query.where(ItemActivity.id < 0)
         related_source_ids = [value for value in db.scalars(
             select(ItemFact.source_activity_id).where(
                 ItemFact.root_task_id == root.id,
@@ -490,7 +502,7 @@ def _visible_activity_query(
 
         if task_id is not None:
             task = db.get(Task, task_id)
-            if task is None or task.parent_id != root.id:
+            if task is None or (task.parent_id != root.id and not (root.kind == "task" and task.id == root.id)):
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="执行任务不存在")
             is_participant = db.scalar(select(Task.id).where(
                 Task.id == task.id,
@@ -667,8 +679,8 @@ def publish_task_progress(
     task = db.scalar(_task_query().where(Task.id == task_id).with_for_update())
     if task is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
-    if task.parent_id is None:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="进展只能发布到执行任务")
+    if task.parent_id is None and task.kind != "task":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="事项不能发布任务进展")
     if task.status == "done":
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="已完成任务不能继续发布执行进展")
     if _is_task_blocked(task):
@@ -676,7 +688,9 @@ def publish_task_progress(
     if not _can_write_task_progress(task, current):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="只有任务负责人、协作者或管理员可以发布进展")
 
-    root = db.scalar(select(Task).where(Task.id == task.parent_id).with_for_update())
+    root = task if task.parent_id is None else db.scalar(
+        select(Task).where(Task.id == task.parent_id).with_for_update()
+    )
     if root is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="所属事项不存在")
     if task.status == "todo":
@@ -712,17 +726,21 @@ def complete_task(
     task = db.scalar(_task_query().where(Task.id == task_id).with_for_update())
     if task is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
-    if task.parent_id is None:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="事项不能通过完成分工操作结束")
+    if task.parent_id is None and task.kind != "task":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="事项不能通过完成任务操作结束")
     if not _is_admin(current) and task.owner_id != current.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="只有任务负责人可以完成任务")
     if task.status == "done":
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="任务已经完成")
     if _is_task_blocked(task):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="前置分工尚未完成，暂时不能完成该任务")
-    root = db.scalar(select(Task).where(Task.id == task.parent_id).with_for_update())
+    root = task if task.parent_id is None else db.scalar(
+        select(Task).where(Task.id == task.parent_id).with_for_update()
+    )
     if root is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="所属事项不存在")
+    if payload.sync_to_item and root.kind != "item":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="独立任务结果不能同步到事项信息")
     if payload.sync_to_item and len(payload.result) > 500:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="同步到事项信息的结果最多 500 字")
 

@@ -61,7 +61,8 @@ export function recentBaseChanges(tasks, relatedTasks, activities, memberId, now
     if (!root) continue
     const relatedIds = relatedTaskIdsByRoot.get(activity.root_task_id) ?? new Set()
     const ownsRoot = root.owner?.id === memberId
-    if (!ownsRoot && activity.task_id !== null && !relatedIds.has(activity.task_id)) continue
+    const isIndependentRootActivity = root.kind === "task" && activity.task_id === root.id
+    if (!ownsRoot && activity.task_id !== null && !relatedIds.has(activity.task_id) && !isIndependentRootActivity) continue
     if ((visibleFactsByRoot.get(activity.root_task_id) ?? []).some((fact) => fact.source_activity_id === activity.id)) continue
 
     const task = activity.task_id === null ? null : taskById.get(activity.task_id)
@@ -71,7 +72,7 @@ export function recentBaseChanges(tasks, relatedTasks, activities, memberId, now
     entries.push({
       id: `activity-${activity.id}`,
       root_task_id: activity.root_task_id,
-      context: task ? `${root.title} · ${task.title}` : root.title,
+      context: task && task.id !== root.id ? `${root.title} · ${task.title}` : root.title,
       content: activity.content,
       created_at: activity.created_at,
       priority: 1,

@@ -92,6 +92,7 @@ def main() -> None:
 
         deadline = datetime(2026, 10, 12, 18, 0)
         root = Task(
+            kind="item",
             parent_id=None,
             title="测试事项：小学机器人科技展",
             deliverable="",
@@ -112,6 +113,7 @@ def main() -> None:
             is_active=True,
         ))
         todo = Task(
+            kind="task",
             parent_id=root.id,
             title="完成现场布展与设备运行确认",
             deliverable="展示设备按计划完成布置并可运行。",
@@ -128,6 +130,7 @@ def main() -> None:
             created_by=admin.id,
         )
         done = Task(
+            kind="task",
             parent_id=root.id,
             title="确认活动时间地点与主办方基础条件",
             deliverable="主办方已确认时间、地点及现场条件。",

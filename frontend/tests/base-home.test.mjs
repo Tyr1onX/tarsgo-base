@@ -41,6 +41,15 @@ assert.equal(recentBaseChanges(allTasks, [], activities, 7, now).length, 0)
 assert.equal(recentBaseChanges(allTasks, relatedTasks, [], 7, now).length, 2)
 const unchangedTasks = allTasks.map((task) => task.parent_id === null ? { ...task, item_facts: [] } : task)
 assert.equal(recentBaseChanges(unchangedTasks, relatedTasks, [], 7, now).length, 0)
+const standalone = { id: 20, kind: "task", parent_id: null, title: "独立任务", owner: { id: 8 }, item_facts: [] }
+const standaloneChange = recentBaseChanges(
+  [standalone],
+  [standalone],
+  [{ id: 120, root_task_id: 20, task_id: 20, content: "独立任务进展", created_at: "2026-10-05T11:00:00Z" }],
+  7,
+  now,
+)
+assert.equal(standaloneChange[0].context, "独立任务")
 
 const manyChanges = recentBaseChanges(allTasks, relatedTasks, [
   ...activities,
@@ -60,6 +69,8 @@ assert.doesNotMatch(home, /aiPlannerAvailable|planFromBase|或手动创建任务
 assert.match(home, /homeRecentChanges.length[\s\S]*?最近与你有关/)
 assert.match(home, /v-if="homeTaskCards.length"[\s\S]*?现在要处理/)
 assert.match(home, /v-for="task in visibleHomeTaskCards"/)
+assert.match(home, /快速创建独立任务/)
+assert.match(home, /isIndependentTask\(task\) \? "独立任务" : "事项"/)
 assert.doesNotMatch(home, /task\.deliverable/)
 assert.match(home, /homeTaskCards.length > 3[\s\S]*?查看全部任务 →/)
 assert.match(home, /v-if="claimableCount"[\s\S]*?还有 \{\{ claimableCount \}\} 项可以认领 →/)

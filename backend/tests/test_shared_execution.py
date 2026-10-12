@@ -66,9 +66,10 @@ def expect_http(expected: int, callback) -> HTTPException:
 
 
 def create_task(db, admin, *, title, parent_id=None, owner_id=None,
-                owner_claimable=False, collaborator_ids=None, dependencies=None):
+                owner_claimable=False, collaborator_ids=None, dependencies=None, kind=None):
     task = tasks_router.create_task(
         TaskCreate(
+            kind=kind,
             title=title,
             deliverable=f"{title}已完成并可核验。",
             parent_id=parent_id,
@@ -164,6 +165,118 @@ def main() -> None:
             db.refresh(unrelated)
             fixture_member_ids.update((owner.id, collaborator.id, unrelated.id))
 
+            # Standalone tasks use the existing claim, collaboration, progress,
+            # completion, and activity history paths without becoming items.
+            standalone_id = create_task(
+                db,
+                admin,
+                title=f"Smoke 独立任务 {token}",
+                kind="task",
+                owner_claimable=True,
+                collaborator_ids=[],
+            )
+            root_ids.add(standalone_id)
+            standalone_wire = tasks_router.get_task(standalone_id, current=admin, db=db)
+            assert standalone_wire.kind == "task" and standalone_wire.parent_id is None
+            expect_http(
+                400,
+                lambda: tasks_router.create_task(
+                    TaskCreate(
+                        kind="task",
+                        title="独立任务下不能再建分工",
+                        parent_id=standalone_id,
+                        owner_id=owner.id,
+                        owner_claimable=False,
+                    ),
+                    current=admin,
+                    db=db,
+                ),
+            )
+            db.rollback()
+            expect_http(
+                400,
+                lambda: tasks_router.add_context_facts_batch(
+                    standalone_id,
+                    ContextFactsBatchIn(facts=["独立任务不产生事项信息"]),
+                    current=admin,
+                    db=db,
+                ),
+            )
+            db.rollback()
+            expect_http(
+                403,
+                lambda: tasks_router.publish_task_progress(
+                    standalone_id,
+                    TaskProgressCreate(content="无关成员不能发布进展"),
+                    current=unrelated,
+                    db=db,
+                ),
+            )
+            db.rollback()
+            claimed_standalone = tasks_router.claim_task_owner(
+                standalone_id, current=owner, db=db,
+            )
+            assert claimed_standalone.owner and claimed_standalone.owner.id == owner.id
+            joined_standalone = tasks_router.join_task_collaboration(
+                standalone_id, current=collaborator, db=db,
+            )
+            assert any(person.id == collaborator.id for person in joined_standalone.collaborators)
+            standalone_progress = tasks_router.publish_task_progress(
+                standalone_id,
+                TaskProgressCreate(content="独立任务已有可见进展记录。"),
+                current=collaborator,
+                db=db,
+            )
+            assert standalone_progress.task.kind == "task"
+            assert standalone_progress.task.status == "doing"
+            assert standalone_progress.activity.root_task_id == standalone_id
+            assert standalone_progress.activity.task_id == standalone_id
+            assert [entry.id for entry in tasks_router.list_item_activities(
+                standalone_id, current=collaborator, db=db,
+            )] == [standalone_progress.activity.id]
+            assert tasks_router.list_item_activities(
+                standalone_id, current=unrelated, db=db,
+            ) == []
+            expect_http(
+                403,
+                lambda: tasks_router.complete_task(
+                    standalone_id,
+                    TaskCompleteCreate(result="协作者不能完成负责人任务"),
+                    current=collaborator,
+                    db=db,
+                ),
+            )
+            db.rollback()
+            expect_http(
+                400,
+                lambda: tasks_router.complete_task(
+                    standalone_id,
+                    TaskCompleteCreate(result="不能同步到事项", sync_to_item=True),
+                    current=owner,
+                    db=db,
+                ),
+            )
+            db.rollback()
+            completed_standalone = tasks_router.complete_task(
+                standalone_id,
+                TaskCompleteCreate(result="独立任务结果已留痕。"),
+                current=owner,
+                db=db,
+            )
+            assert completed_standalone.task.kind == "task"
+            assert completed_standalone.task.status == "done"
+            assert completed_standalone.task.result == "独立任务结果已留痕。"
+            assert completed_standalone.activity.root_task_id == standalone_id
+            assert completed_standalone.activity.task_id == standalone_id
+            standalone_context = tasks_router.get_task_context(
+                standalone_id, current=admin, db=db,
+            )
+            assert standalone_context.root.kind == "task" and standalone_context.tasks == []
+            assert {activity.id for activity in standalone_context.activity_page.items} == {
+                standalone_progress.activity.id,
+                completed_standalone.activity.id,
+            }
+
             root_id = create_task(db, admin, title=f"Smoke 共享事项 {token}", owner_id=admin.id)
             root_ids.add(root_id)
             first_id = create_task(
@@ -194,12 +307,14 @@ def main() -> None:
 
             detail_context = tasks_router.get_task_context(first_id, current=admin, db=db)
             assert detail_context.root.id == root_id
+            assert detail_context.root.kind == "item"
             assert {task.id for task in detail_context.tasks} == {first_id, second_id, third_id}
             assert detail_context.activity_page.items == []
             assert not detail_context.activity_page.has_more
 
             first = tasks_router._get_task(db, first_id)
             first_wire = tasks_router._task_out(first)
+            assert first_wire.kind == "task"
             assert first_wire.status == "todo" and not first_wire.blocked
             second_wire = tasks_router._task_out(tasks_router._get_task(db, second_id))
             assert second_wire.blocked is True

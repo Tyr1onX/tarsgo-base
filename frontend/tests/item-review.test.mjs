@@ -14,7 +14,7 @@ assert.match(appSource, /＋ 添加注意/)
 assert.match(appSource, /开始前需要/)
 assert.match(appSource, /＋ 添加开始条件/)
 assert.match(appSource, /taskDetailSections\(task: Task\)[\s\S]*?title: "执行提示"[\s\S]*?title: "开始前需要"/)
-assert.ok(appSource.includes('<summary>{{ parentTaskId === null ? "协作设置" : "执行说明与协作设置" }}</summary>'))
+assert.ok(appSource.includes('<summary>{{ taskEditorShowsExecutionFields ? "执行说明与协作设置" : "协作设置" }}</summary>'))
 
 const reviewChanges = itemReviewChanges(
   {

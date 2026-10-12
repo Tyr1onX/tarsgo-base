@@ -39,7 +39,7 @@ assert.equal((normalRoot.match(/class="primary small-action"/g) ?? []).length, 1
 assert.match(normalRoot, /认领事项负责人/)
 assert.match(normalRoot, /<TaskActionMenu/)
 assert.doesNotMatch(normalRoot, />\s*(?:取消认领|加入协作|退出协作|编辑|删除)\s*<\/button>/)
-assert.match(app, /label: "删除事项"[\s\S]*?danger: true/)
+assert.match(app, /label: isIndependentTask\(task\) \? "删除任务" : "删除事项"[\s\S]*?danger: true/)
 assert.match(app, /function handleRootTaskMenuAction/)
 
 // Daily and camp leave use the shared menu for low-frequency document actions.

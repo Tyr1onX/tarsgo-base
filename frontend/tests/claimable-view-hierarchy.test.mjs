@@ -2,6 +2,7 @@ import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 
 import {
+  isIndependentTask,
   patchTaskCollection,
   rootsForView,
   tasksForRoot,
@@ -13,7 +14,7 @@ const css = readFileSync(new URL("../src/style.css", import.meta.url), "utf8")
 const member = { id: 7 }
 const owner = { id: 8 }
 const root = {
-  id: 1, parent_id: null, owner: owner, owner_claimable: false,
+  id: 1, kind: "item", parent_id: null, owner: owner, owner_claimable: false,
   status: "doing", collaborators: [], deadline: null,
 }
 const claimOne = {
@@ -25,6 +26,13 @@ const assignedChild = {
   ...claimOne, id: 4, owner: member, owner_claimable: false,
 }
 const rows = [root, claimOne, claimTwo, assignedChild]
+const independent = {
+  id: 5, kind: "task", parent_id: null, owner: null, owner_claimable: true,
+  status: "todo", collaborators: [], deadline: null,
+}
+assert.equal(isIndependentTask(independent), true)
+assert.equal(isIndependentTask(root), false)
+assert.deepEqual(rootsForView([...rows, independent], "claimable", member.id).map((task) => task.id), [root.id, independent.id])
 
 assert.deepEqual(rootsForView(rows, "claimable", member.id).map((task) => task.id), [root.id])
 assert.deepEqual(tasksForRoot(rows, root.id, "claimable", member.id).map((task) => task.id), [claimOne.id, claimTwo.id])

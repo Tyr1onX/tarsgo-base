@@ -215,7 +215,7 @@ def extract_activity_facts(
     root = db.get(Task, root_task_id)
     if root is None:
         raise HTTPException(status_code=404, detail="事项不存在")
-    if root.parent_id is not None:
+    if root.parent_id is not None or root.kind != "item":
         raise HTTPException(status_code=400, detail="只能从事项执行进展提取信息")
     activity = db.scalar(
         select(ItemActivity).where(
@@ -297,7 +297,7 @@ def review_item_plan(
     root = db.get(Task, root_task_id)
     if root is None:
         raise HTTPException(status_code=404, detail="事项不存在")
-    if root.parent_id is not None:
+    if root.parent_id is not None or root.kind != "item":
         raise HTTPException(status_code=400, detail="只能检查根事项方案")
 
     children = list(
@@ -333,7 +333,7 @@ def apply_item_review_suggestion(
     root = db.get(Task, root_task_id)
     if root is None:
         raise HTTPException(status_code=404, detail="事项不存在")
-    if root.parent_id is not None:
+    if root.parent_id is not None or root.kind != "item":
         raise HTTPException(status_code=400, detail="只能应用到根事项方案")
 
     if suggestion.kind == "update_task":
@@ -356,6 +356,7 @@ def apply_item_review_suggestion(
         ).all()):
             raise HTTPException(status_code=409, detail="当前事项已有相同分工")
         task = Task(
+            kind="task",
             parent_id=root.id,
             title=suggestion.proposed_task.title,
             deliverable=suggestion.proposed_task.deliverable,

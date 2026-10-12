@@ -1,3 +1,7 @@
+export function isIndependentTask(task) {
+  return task.kind === "task" && task.parent_id === null
+}
+
 export function taskMatchesView(task, view, memberId) {
   if (view === "all") return true
   if (view === "claimable") {

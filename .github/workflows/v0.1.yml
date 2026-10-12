@@ -102,6 +102,15 @@ jobs:
               300, 101, '李四', '26000001', 'art', 'formal'
             );
           "
+          docker compose exec -T db mysql -uroot -p"$CI_MYSQL_ROOT_PASSWORD" tarsgo_migration -e "
+            INSERT INTO tasks (
+              id, parent_id, title, deliverable, execution_points, cautions, prerequisites,
+              result, owner_id, owner_claimable, collaboration_open, deadline, status, created_by
+            ) VALUES (
+              102, 100, '旧版事项分工', '旧版子任务交付', JSON_ARRAY(), JSON_ARRAY(), JSON_ARRAY(),
+              '', 101, 0, 0, NULL, 'todo', 100
+            );
+          "
           docker compose exec -T -e DB_NAME="$MIGRATION_DB" api alembic upgrade head
           DEADLINE_NULLABLE="$(docker compose exec -T db mysql -uroot -p"$CI_MYSQL_ROOT_PASSWORD" -N -B -e "SELECT IS_NULLABLE FROM information_schema.columns WHERE table_schema = 'tarsgo_migration' AND table_name = 'tasks' AND column_name = 'deadline'")"
           test "$DEADLINE_NULLABLE" = "YES"
@@ -127,6 +136,10 @@ jobs:
           test "$DAILY_LEAVE_TABLES" = "2"
           DAILY_LEAVE_PRESERVED="$(docker compose exec -T db mysql -uroot -p"$CI_MYSQL_ROOT_PASSWORD" -N -B tarsgo_migration -e "SELECT CONCAT((SELECT COUNT(*) FROM daily_leave_windows), '|', (SELECT COUNT(*) FROM daily_leave_entries), '|', (SELECT COUNT(*) FROM daily_leave_entries WHERE window_id = 300 AND start_at IS NULL AND end_at IS NULL))")"
           test "$DAILY_LEAVE_PRESERVED" = "1|1|1"
+          LEGACY_ROOT_KIND="$(docker compose exec -T db mysql -uroot -p"$CI_MYSQL_ROOT_PASSWORD" -N -B tarsgo_migration -e "SELECT kind FROM tasks WHERE id = 100")"
+          test "$LEGACY_ROOT_KIND" = "item"
+          LEGACY_CHILD_KIND="$(docker compose exec -T db mysql -uroot -p"$CI_MYSQL_ROOT_PASSWORD" -N -B tarsgo_migration -e "SELECT kind FROM tasks WHERE id = 102")"
+          test "$LEGACY_CHILD_KIND" = "task"
           DAILY_ENTRY_WINDOW_NULLABLE="$(docker compose exec -T db mysql -uroot -p"$CI_MYSQL_ROOT_PASSWORD" -N -B -e "SELECT IS_NULLABLE FROM information_schema.columns WHERE table_schema = 'tarsgo_migration' AND table_name = 'daily_leave_entries' AND column_name = 'window_id'")"
           test "$DAILY_ENTRY_WINDOW_NULLABLE" = "YES"
           DAILY_ENTRY_TIME_COLUMNS="$(docker compose exec -T db mysql -uroot -p"$CI_MYSQL_ROOT_PASSWORD" -N -B -e "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = 'tarsgo_migration' AND table_name = 'daily_leave_entries' AND column_name IN ('start_at', 'end_at')")"

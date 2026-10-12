@@ -26,6 +26,7 @@ import type {
   MyProfilePayload,
   MemberSummary,
   TaskAssigneeOption,
+  TaskKind,
   KnowledgeDocument,
   KnowledgeSyncSummary,
   Role,
@@ -107,6 +108,7 @@ async function downloadFile(url: string, fallbackName: string, init?: RequestIni
 }
 
 export interface TaskPayload {
+  kind?: TaskKind
   title: string
   deliverable?: string
   execution_points?: string[]
@@ -392,7 +394,7 @@ export const api = {
     request<Task>("/api/tasks", { method: "POST", body: JSON.stringify(payload) }),
   createTaskBatch: (payload: TaskBatchPayload) =>
     request<TaskBatchResult>("/api/tasks/batch", { method: "POST", body: JSON.stringify(payload) }),
-  updateTask: (taskId: number, payload: Partial<Omit<TaskPayload, "parent_id">> & { result?: string }) =>
+  updateTask: (taskId: number, payload: Partial<Omit<TaskPayload, "parent_id" | "kind">> & { result?: string }) =>
     request<Task>(`/api/tasks/${taskId}`, { method: "PATCH", body: JSON.stringify(payload) }),
   claimTask: (taskId: number) => request<Task>(`/api/tasks/${taskId}/claim`, { method: "POST" }),
   unclaimTask: (taskId: number) => request<Task>(`/api/tasks/${taskId}/unclaim`, { method: "POST" }),

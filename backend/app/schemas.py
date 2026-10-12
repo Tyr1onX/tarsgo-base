@@ -10,6 +10,7 @@ TeamGroup = Literal["electrical", "mechanical", "vision", "ai", "operations"]
 TeamMembership = Literal["formal", "reserve"]
 MemberStatus = Literal["invited", "active", "disabled"]
 TaskStatus = Literal["todo", "doing", "done"]
+TaskKind = Literal["item", "task"]
 SchoolLeaveRequestStatus = Literal["pending", "included", "withdrawn"]
 SchoolLeaveRunStatus = Literal["ready", "awaiting_return", "completed", "cancelled"]
 SchoolLeaveResultState = Literal["available", "cleared"]
@@ -570,6 +571,7 @@ class SchoolLeaveAdminSummaryOut(BaseModel):
 
 
 class TaskCreate(BaseModel):
+    kind: TaskKind | None = None
     title: str = Field(min_length=1, max_length=200)
     deliverable: str = Field(default="", max_length=5000)
     execution_points: list[TaskDetailText] = Field(default_factory=list, max_length=6)
@@ -696,6 +698,7 @@ class ItemFactOut(BaseModel):
 
 class TaskOut(BaseModel):
     id: int
+    kind: TaskKind
     parent_id: int | None
     title: str
     deliverable: str

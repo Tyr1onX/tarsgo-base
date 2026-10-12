@@ -3,6 +3,7 @@ export type TeamGroup = "electrical" | "mechanical" | "vision" | "ai" | "operati
 export type TeamMembership = "formal" | "reserve"
 export type MemberStatus = "invited" | "active" | "disabled"
 export type TaskStatus = "todo" | "doing" | "done"
+export type TaskKind = "item" | "task"
 export type TaskView = "mine" | "claimable" | "all"
 export type ItemFactScope = "global" | "related"
 
@@ -30,6 +31,7 @@ export interface TaskAssigneeOption extends MemberSummary {
 
 export interface Task {
   id: number
+  kind: TaskKind
   parent_id: number | null
   title: string
   deliverable: string

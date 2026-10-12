@@ -20,6 +20,7 @@ import { filterMembers } from "./memberSearch.js"
 import {
   claimableTask,
   compareTaskDeadlines,
+  isIndependentTask,
   mergeRecentActivities,
   patchTaskCollection,
   prependUniqueActivity,
@@ -281,7 +282,13 @@ const parentTask = computed(() =>
   parentTaskId.value === null ? null : tasks.value.find((task) => task.id === parentTaskId.value) ?? null,
 )
 const taskEditorHeading = computed(() =>
-  taskEditorTitle(taskEditor.value, editingTask.value?.parent_id !== null && editingTask.value !== null),
+  editingTask.value && isIndependentTask(editingTask.value)
+    ? "编辑独立任务"
+    : taskEditorTitle(taskEditor.value, editingTask.value?.parent_id !== null && editingTask.value !== null),
+)
+const taskEditorShowsExecutionFields = computed(() =>
+  parentTaskId.value !== null || taskEditor.value?.kind === "new-task" ||
+  Boolean(editingTask.value && isIndependentTask(editingTask.value)),
 )
 const ownerOptions = computed<TaskAssigneeOption[]>(() => {
   const options = [...activeMembers.value]
@@ -366,12 +373,12 @@ const canPublishTaskProgress = computed(() => {
   const task = detailTask.value
   const currentId = user.value?.id
   return Boolean(
-    task && task.parent_id !== null && task.status !== "done" && !task.blocked && currentId &&
+    task && (task.parent_id !== null || isIndependentTask(task)) && task.status !== "done" && !task.blocked && currentId &&
     (isAdmin.value || task.owner?.id === currentId || task.collaborators.some((person) => person.id === currentId)),
   )
 })
 const canCompleteDetailTask = computed(() =>
-  Boolean(detailTask.value && detailTask.value.parent_id !== null && detailTask.value.status !== "done" && !detailTask.value.blocked &&
+  Boolean(detailTask.value && (detailTask.value.parent_id !== null || isIndependentTask(detailTask.value)) && detailTask.value.status !== "done" && !detailTask.value.blocked &&
     (isAdmin.value || detailTask.value.owner?.id === user.value?.id)),
 )
 const availableDependencyTasks = computed(() =>
@@ -724,7 +731,7 @@ function syncCollaborationRefreshTimer() {
 
 async function reviewCurrentItemPlan() {
   const root = detailTask.value
-  if (!root || root.parent_id !== null || !aiReviewAvailable.value || itemReviewLoading.value) return
+  if (!root || root.parent_id !== null || root.kind !== "item" || !aiReviewAvailable.value || itemReviewLoading.value) return
   error.value = ""
   itemReviewLoading.value = true
   clearItemReview()
@@ -757,7 +764,7 @@ function changesForReviewSuggestion(suggestion: AIItemReviewSuggestion) {
 
 async function applyItemReviewSuggestion(entry: { key: string; suggestion: AIItemReviewSuggestion }) {
   const root = detailTask.value
-  if (!root || root.parent_id !== null || !isAdmin.value || itemReviewApplyingKey.value) return
+  if (!root || root.parent_id !== null || root.kind !== "item" || !isAdmin.value || itemReviewApplyingKey.value) return
   error.value = ""
   itemReviewApplyingKey.value = entry.key
   try {
@@ -798,10 +805,13 @@ function openDeleteRootItemModal(root = detailRoot.value, origin: "detail" | "li
   deleteTargetRootId.value = root.id
   deleteRootOrigin.value = origin
   const childCount = tasks.value.filter((task) => task.parent_id === root.id).length
+  const independent = isIndependentTask(root)
   requestAppConfirmation({
-    title: "删除事项？",
-    description: `将同时删除此事项下的 ${childCount} 项分工、进展记录和当前信息，此操作不可恢复。`,
-    confirmLabel: "删除事项",
+    title: independent ? "删除独立任务？" : "删除事项？",
+    description: independent
+      ? "将同时删除此任务的进展记录，此操作不可恢复。"
+      : `将同时删除此事项下的 ${childCount} 项分工、进展记录和当前信息，此操作不可恢复。`,
+    confirmLabel: independent ? "删除任务" : "删除事项",
     danger: true,
     action: confirmDeleteRootItem,
   })
@@ -835,7 +845,7 @@ async function confirmDeleteRootItem() {
         // Keep the optimistically filtered list if refreshing fails.
       }
     }
-    showFeedback("success", "事项已删除")
+    showFeedback("success", isIndependentTask(root) ? "独立任务已删除" : "事项已删除")
   } catch (reason) {
     error.value = messageOf(reason)
   } finally {
@@ -999,6 +1009,17 @@ async function startChildTask(parent: Task) {
     return
   }
   navigate(`/tasks/${parent.id}/new-child`)
+}
+
+async function startIndependentTask() {
+  if (!isAdmin.value) return
+  try {
+    await ensureTaskAssignees()
+  } catch (reason) {
+    error.value = messageOf(reason)
+    return
+  }
+  navigate("/tasks/new")
 }
 
 async function editTask(task: Task) {
@@ -1627,6 +1648,7 @@ async function submitTask() {
         : original
     } else {
       updatedTask = await api.createTask({
+        kind: taskEditor.value?.kind === "new-task" ? "task" : undefined,
         parent_id: parentTaskId.value,
         title: taskTitle.value,
         deliverable: taskDeliverable.value,
@@ -1646,7 +1668,7 @@ async function submitTask() {
     replaceTaskInState(updatedTask)
     clearItemReview()
     tasksLoadedScope.value = null
-    navigate(taskEditorSuccessPath(taskEditor.value), { replace: true })
+    navigate(taskEditorSuccessPath(taskEditor.value, updatedTask.id), { replace: true })
   } catch (reason) {
     error.value = messageOf(reason)
   } finally {
@@ -1704,7 +1726,7 @@ function taskMenuActions(task: Task): TaskActionMenuItem[] {
   if (task.collaboration_open && isCollaborator(task) && task.status !== "done") {
     actions.push({ key: "leave", label: pendingTaskAction(task.id) === "leave" ? "退出中…" : "退出协作", disabled: pending })
   }
-  if (isAdmin.value) actions.push({ key: "edit", label: task.parent_id === null ? "编辑事项" : "编辑分工", disabled: pending })
+  if (isAdmin.value) actions.push({ key: "edit", label: isIndependentTask(task) ? "编辑任务" : task.parent_id === null ? "编辑事项" : "编辑分工", disabled: pending })
   return actions
 }
 
@@ -1718,12 +1740,12 @@ function handleTaskMenuAction(task: Task, action: string) {
 function rootTaskMenuActions(task: Task): TaskActionMenuItem[] {
   const pending = Boolean(pendingTaskAction(task.id))
   const actions = taskMenuActions(task).map((action) =>
-    action.key === "edit" ? { ...action, label: "编辑事项" } : action,
+    action.key === "edit" ? { ...action, label: isIndependentTask(task) ? "编辑任务" : "编辑事项" } : action,
   )
   if (isAdmin.value) {
     actions.push({
       key: "delete",
-      label: "删除事项",
+      label: isIndependentTask(task) ? "删除任务" : "删除事项",
       disabled: pending,
       danger: true,
     })
@@ -1741,7 +1763,7 @@ function handleRootTaskMenuAction(task: Task, action: string) {
 
 function detailRootTaskMenuActions(task: Task): TaskActionMenuItem[] {
   const actions = rootTaskMenuActions(task)
-  if (task.parent_id === null && aiReviewAvailable.value) {
+  if (task.kind === "item" && task.parent_id === null && aiReviewAvailable.value) {
     const deleteIndex = actions.findIndex((action) => action.key === "delete")
     actions.splice(deleteIndex < 0 ? actions.length : deleteIndex, 0, {
       key: "review",
@@ -1798,7 +1820,7 @@ async function publishTaskProgress() {
     taskProgressDraft.value = ""
     clearItemReview()
     notice.value = "进展已发布"
-    if (isCurrentFactSuggestionRequest(task.id, taskDetailId.value, epoch, factExtractionEpoch)) {
+    if (published.task.parent_id !== null && isCurrentFactSuggestionRequest(task.id, taskDetailId.value, epoch, factExtractionEpoch)) {
       factExtractionLoading.value = true
       void extractProgressFacts(task.id, published.task.parent_id as number, published.activity, epoch)
     }
@@ -1864,17 +1886,18 @@ async function completeDetailTask() {
   const task = detailTask.value
   const result = taskCompletionDraft.value.trim()
   if (!task || !result || !canCompleteDetailTask.value || taskCompletionSaving.value) return
-  if (taskCompletionSync.value && result.length > 500) {
+  const syncToItem = task.parent_id !== null && taskCompletionSync.value
+  if (syncToItem && result.length > 500) {
     error.value = "同步到事项信息的最终结果最多 500 字。"
     return
   }
   error.value = ""
   taskCompletionSaving.value = true
   try {
-    const completed = await api.completeTask(task.id, result, taskCompletionSync.value)
+    const completed = await api.completeTask(task.id, result, syncToItem)
     replaceTaskInState(completed.task)
     itemActivities.value = prependUniqueActivity(itemActivities.value, completed.activity)
-    if (taskCompletionSync.value && detailRoot.value) {
+    if (syncToItem && detailRoot.value) {
       void refreshExecutionScene(true)
     }
     taskCompletionDraft.value = ""
@@ -2739,9 +2762,9 @@ onBeforeUnmount(() => {
       </template>
 
       <section v-else-if="taskDetailId !== null && detailContextLoading" class="system-state" role="status" aria-live="polite">
-        <span class="system-code">BASE / ITEM</span>
-        <h1>正在加载事项</h1>
-        <p>正在读取事项分工和最近进展…</p>
+        <span class="system-code">BASE / TASK</span>
+        <h1>正在加载任务</h1>
+        <p>正在读取任务信息和最近进展…</p>
       </section>
 
       <template v-else-if="isTaskEditorRoute">
@@ -2829,9 +2852,9 @@ onBeforeUnmount(() => {
           </label>
 
           <details class="advanced-fields">
-            <summary>{{ parentTaskId === null ? "协作设置" : "执行说明与协作设置" }}</summary>
+            <summary>{{ taskEditorShowsExecutionFields ? "执行说明与协作设置" : "协作设置" }}</summary>
             <div class="advanced-grid">
-              <label v-if="parentTaskId !== null">
+              <label v-if="taskEditorShowsExecutionFields">
                 做到什么算完成
                 <textarea
                   v-model="taskDeliverable"
@@ -2841,7 +2864,7 @@ onBeforeUnmount(() => {
                 />
               </label>
 
-              <section v-if="parentTaskId !== null" class="task-edit-hints">
+              <section v-if="taskEditorShowsExecutionFields" class="task-edit-hints">
                 <h3>执行提示</h3>
                 <label>
                   怎么做（每行一条，最多 6 条）
@@ -2856,7 +2879,7 @@ onBeforeUnmount(() => {
                 <button v-else class="planner-add-detail" type="button" @click="taskCautionsOpen = true">＋ 添加注意</button>
               </section>
 
-              <section v-if="parentTaskId !== null" class="task-edit-prerequisites">
+              <section v-if="taskEditorShowsExecutionFields" class="task-edit-prerequisites">
                 <label v-if="taskPrerequisitesText.trim() || taskPrerequisitesOpen">
                   开始前需要（每行一条，最多 4 条）
                   <textarea v-model="taskPrerequisitesText" data-validation-field="task-prerequisites" rows="2" placeholder="只有缺少时任务就不能合理开始的条件" />
@@ -2919,7 +2942,7 @@ onBeforeUnmount(() => {
           </details>
 
           <button class="primary task-editor-save" type="submit" :disabled="taskSaving">
-            {{ taskSaving ? "正在保存…" : editingTaskId !== null ? "保存修改" : parentTaskId !== null ? "添加分工" : "发布事项" }}
+            {{ taskSaving ? "正在保存…" : editingTaskId !== null ? "保存修改" : parentTaskId !== null ? "添加分工" : taskEditor?.kind === "new-task" ? "创建独立任务" : "发布事项" }}
           </button>
         </form>
       </template>
@@ -2928,6 +2951,7 @@ onBeforeUnmount(() => {
         <section class="base-entry">
           <p class="base-kicker">TARS BASE</p>
           <h1>{{ isAdmin ? "现在要处理什么？" : "现在要处理" }}</h1>
+          <button v-if="isAdmin" class="primary" type="button" @click="startIndependentTask">快速创建独立任务</button>
 
           <div
             v-if="isAdmin"
@@ -3012,7 +3036,7 @@ onBeforeUnmount(() => {
               @click="openTaskDetail(task)"
             >
               <span v-if="task.parent_id" class="state">{{ homeRoot(task)?.title || "事项" }}</span>
-              <span v-else class="state">事项</span>
+              <span v-else class="state">{{ isIndependentTask(task) ? "独立任务" : "事项" }}</span>
               <strong>{{ task.title }}</strong>
               <span class="home-task-meta">
                 <TaskStatusIndicator :status="task.status" :task-id="task.id" />
@@ -3281,13 +3305,13 @@ onBeforeUnmount(() => {
         <div class="page-title execution-detail-heading">
           <div>
             <button class="detail-back" type="button" @click="detailTask.parent_id ? openTaskDetail(detailRoot) : navigateTasks('all')">← 返回</button>
-            <span class="state">{{ detailTask.parent_id ? detailRoot.title : "事项执行" }}</span>
+            <span class="state">{{ detailTask.parent_id ? detailRoot.title : isIndependentTask(detailTask) ? "独立任务" : "事项执行" }}</span>
             <h1>{{ detailTask.title }}</h1>
           </div>
           <TaskActionMenu
             v-if="detailTask.parent_id === null"
             :task-id="`detail-root-${detailTask.id}`"
-            aria-label="事项更多操作"
+            :aria-label="isIndependentTask(detailTask) ? '独立任务更多操作' : '事项更多操作'"
             :actions="detailRootTaskMenuActions(detailTask)"
             :disabled="Boolean(pendingTaskAction(detailTask.id))"
             @select="handleDetailRootTaskMenuAction(detailTask, $event)"
@@ -3295,7 +3319,7 @@ onBeforeUnmount(() => {
           <button v-else-if="isAdmin" type="button" @click="editTaskFromDetail(detailTask)">编辑</button>
         </div>
 
-        <template v-if="detailTask.parent_id === null">
+        <template v-if="detailTask.kind === 'item'">
           <section class="execution-section">
             <div class="execution-meta">
               <TaskStatusIndicator
@@ -3425,7 +3449,7 @@ onBeforeUnmount(() => {
                 <div class="activity-byline">
                   <time>{{ formatDate(activity.created_at) }}</time>
                   <small>{{ activity.author.name }}</small>
-                  <span v-if="activity.task_id" class="activity-source">{{ sourceTaskTitle(activity, tasks) }}</span>
+                <span v-if="activity.task_id && activity.task_id !== detailRoot.id" class="activity-source">{{ sourceTaskTitle(activity, tasks) }}</span>
                 </div>
                 <p>{{ activity.content }}</p>
               </article>
@@ -3497,7 +3521,7 @@ onBeforeUnmount(() => {
             </div>
           </section>
 
-          <section class="execution-section shared-scene">
+          <section v-if="detailTask.parent_id !== null" class="execution-section shared-scene">
             <div class="section-heading shared-scene-heading">
               <h2>与你当前工作相关的信息</h2>
               <button type="button" class="text-action" @click="openTaskDetail(detailRoot)">查看全部事项信息 →</button>
@@ -3548,7 +3572,7 @@ onBeforeUnmount(() => {
             </form>
           </section>
 
-          <section v-if="factExtractionLoading || factSuggestions.length" class="execution-section fact-suggestions-panel" aria-live="polite">
+          <section v-if="detailTask.parent_id !== null && (factExtractionLoading || factSuggestions.length)" class="execution-section fact-suggestions-panel" aria-live="polite">
             <div class="section-heading"><h2>发现可能需要同步的信息</h2></div>
             <p v-if="factExtractionLoading" class="muted">正在整理这次更新中的已确认信息…</p>
             <template v-else>
@@ -3603,7 +3627,7 @@ onBeforeUnmount(() => {
                 <div class="activity-byline">
                   <time>{{ formatDate(activity.created_at) }}</time>
                   <small>{{ activity.author.name }}</small>
-                  <span v-if="activity.task_id" class="activity-source">{{ sourceTaskTitle(activity, tasks) }}</span>
+                <span v-if="activity.task_id && activity.task_id !== detailRoot.id" class="activity-source">{{ sourceTaskTitle(activity, tasks) }}</span>
                 </div>
                 <p>{{ activity.content }}</p>
               </article>
@@ -3636,7 +3660,7 @@ onBeforeUnmount(() => {
             <form class="progress-entry" @submit.prevent="completeDetailTask">
               <label for="task-completion-result">最终结果</label>
               <textarea id="task-completion-result" v-model="taskCompletionDraft" maxlength="5000" rows="3" required placeholder="写下最终完成结果" />
-              <label class="check-row">
+              <label v-if="detailTask.parent_id !== null" class="check-row">
                 <input v-model="taskCompletionSync" type="checkbox" />
                 将最终确认信息同步给整个事项（最多 500 字）
               </label>
@@ -3681,6 +3705,7 @@ onBeforeUnmount(() => {
       <template v-else-if="path === '/tasks'">
         <div class="page-title">
           <h1>任务</h1>
+          <button v-if="isAdmin" type="button" @click="startIndependentTask">＋ 快速创建独立任务</button>
         </div>
 
         <div class="view-tabs" role="tablist" aria-label="任务视图">
@@ -3707,7 +3732,34 @@ onBeforeUnmount(() => {
           </div>
           <div v-else-if="rootTasks.length" class="operation-list">
             <article v-for="task in rootTasks" :key="task.id" class="operation-card" :class="{ 'claimable-root-card': taskView === 'claimable' }">
-              <template v-if="taskView === 'claimable'">
+              <template v-if="isIndependentTask(task)">
+                <div class="operation-card-top">
+                  <div class="operation-main">
+                    <div class="root-status-line"><span class="state">独立任务</span><TaskStatusIndicator :status="task.status" :task-id="task.id" :editable="isAdmin && taskView === 'all'" :pending="Boolean(pendingTaskAction(task.id)?.startsWith('status:'))" @update-status="updateOwnTaskStatus(task, $event)" /></div>
+                    <button class="task-title-link" type="button" @click="openTaskDetail(task)"><h3>{{ task.title }}</h3></button>
+                    <small>{{ task.owner ? task.owner.name + " 负责" : "待认领" }}</small>
+                    <small v-if="task.deadline">截止 {{ formatDate(task.deadline) }}</small>
+                    <small v-if="task.collaborators.length">协作：{{ task.collaborators.map((member) => member.name).join("、") }}</small>
+                    <p v-if="task.deliverable" class="child-task-deliverable">{{ task.deliverable }}</p>
+                  </div>
+                  <div class="task-actions root-task-actions">
+                    <button
+                      v-if="!task.owner && task.owner_claimable && task.status !== 'done'"
+                      class="primary small-action"
+                      type="button"
+                      :disabled="Boolean(pendingTaskAction(task.id))"
+                      @click="claimTask(task)"
+                    >{{ pendingTaskAction(task.id) === 'claim' ? '认领中…' : '认领任务' }}</button>
+                    <TaskActionMenu
+                      :task-id="`root-${task.id}`"
+                      :actions="rootTaskMenuActions(task)"
+                      :disabled="Boolean(pendingTaskAction(task.id))"
+                      @select="handleRootTaskMenuAction(task, $event)"
+                    />
+                  </div>
+                </div>
+              </template>
+              <template v-else-if="taskView === 'claimable'">
                 <div class="claimable-root-summary">
                   <div class="claimable-root-heading">
                     <div class="root-status-line"><span class="state">事项</span><TaskStatusIndicator :status="task.status" :task-id="task.id" :editable="false" /></div>
@@ -3765,6 +3817,7 @@ onBeforeUnmount(() => {
                 </div>
               </div>
 
+              <template v-if="task.kind === 'item'">
               <div v-if="taskView !== 'claimable'" class="root-breakdown-control">
                 <button
                   v-if="taskViewChildren(task.id).length"
@@ -3822,6 +3875,7 @@ onBeforeUnmount(() => {
                   </article>
                 </div>
               </div>
+              </template>
             </article>
           </div>
 
@@ -3834,7 +3888,7 @@ onBeforeUnmount(() => {
             <h3 v-else>运营列表还是空的</h3>
             <p v-if="taskView === 'mine'">目前没有你负责或参与的任务。</p>
             <p v-else-if="taskView === 'claimable'">新的可认领任务出现后，会显示在这里。</p>
-            <p v-else>还没有正式发布的运营事项。</p>
+            <p v-else>还没有正式发布的事项或独立任务。</p>
           </div>
         </section>
       </template>

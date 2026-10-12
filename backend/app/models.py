@@ -376,12 +376,17 @@ class Task(Base):
     __table_args__ = (
         CheckConstraint("status IN ('todo','doing','done')", name="ck_tasks_status"),
         CheckConstraint(
+            "kind IN ('item','task') AND (parent_id IS NULL OR kind = 'task')",
+            name="ck_tasks_kind",
+        ),
+        CheckConstraint(
             "owner_id IS NOT NULL OR owner_claimable = 1",
             name="ck_tasks_owner_or_claimable",
         ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(String(20), default="item", server_default="item", nullable=False)
     parent_id: Mapped[int | None] = mapped_column(ForeignKey("tasks.id"), nullable=True)
     title: Mapped[str] = mapped_column(String(200))
     deliverable: Mapped[str] = mapped_column(Text())

@@ -33,7 +33,7 @@ assert.equal((app.match(/查看全部进展/g) ?? []).length, 2, "root and child
 
 // AI review is an item menu action and its result area exists only while checking or when suggestions remain.
 assert.match(taskMenu, /ariaLabel\?: string/)
-assert.match(app, /aria-label="事项更多操作"[\s\S]*?:actions="detailRootTaskMenuActions\(detailTask\)"/)
+assert.match(app, /:aria-label="isIndependentTask\(detailTask\) \? '独立任务更多操作' : '事项更多操作'"[\s\S]*?:actions="detailRootTaskMenuActions\(detailTask\)"/)
 assert.match(app, /key: "review",\s*label: "检查当前方案"/)
 assert.match(app, /v-if="itemReviewLoading \|\| itemReviewSuggestions\.length" class="execution-section ai-review-section"/)
 assert.doesNotMatch(app, /让 AI 检查方案|class="review-trigger"/)
@@ -42,7 +42,7 @@ assert.match(functionSource("dismissItemReviewSuggestion"), /if \(!itemReviewSug
 
 // Delete is absent from the detail body and opens the shared dangerous confirmation from its action menu.
 assert.doesNotMatch(app, /危险操作|danger-zone/)
-assert.match(app, /key: "delete",\s*label: "删除事项"[\s\S]*?danger: true/)
+assert.match(app, /key: "delete",\s*label: isIndependentTask\(task\) \? "删除任务" : "删除事项"[\s\S]*?danger: true/)
 assert.match(functionSource("handleDetailRootTaskMenuAction"), /openDeleteRootItemModal\(task, "detail"\)/)
 assert.match(functionSource("openDeleteRootItemModal"), /requestAppConfirmation\([\s\S]*?danger: true[\s\S]*?action: confirmDeleteRootItem/)
 assert.match(app, /<ConfirmDialog[\s\S]*?@confirm="confirmAppConfirmation"/)
@@ -62,7 +62,7 @@ assert.match(app, /detailProgress\.done \/ detailProgress\.total/)
 assert.match(app, /@click="openTaskDetail\(task\)"/)
 assert.match(app, /api\.publishTaskProgress\(task\.id, content\)/)
 assert.match(app, /api\.extractActivityFacts\(rootTaskId, activity\.id\)/)
-assert.match(app, /api\.completeTask\(task\.id, result, taskCompletionSync\.value\)/)
+assert.match(app, /api\.completeTask\(task\.id, result, syncToItem\)/)
 assert.match(app, /api\.updateTask\(task\.id, \{ result: taskResultDraft\.value \}\)/)
 assert.match(app, /api\.itemActivityPage\(root\.id, selected\.parent_id === null \? undefined : selected\.id, 20, beforeId\)/)
 assert.match(app, /api\.deleteRootTask\(root\.id\)/)
