@@ -22,7 +22,12 @@ def database_url() -> URL:
     )
 
 
-engine = create_engine(database_url(), pool_pre_ping=True)
+# Keep naive MySQL DATETIME defaults in UTC; admin leave history converts them to Beijing time.
+engine = create_engine(
+    database_url(),
+    pool_pre_ping=True,
+    connect_args={"init_command": "SET time_zone = '+00:00'"},
+)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
 

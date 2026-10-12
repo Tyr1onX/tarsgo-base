@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import io
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
@@ -38,6 +38,7 @@ from ..schemas import (
 from ..school_leave import (
     SCHOOL_LEAVE_RESULT_MAX_BYTES,
     SCHOOL_LEAVE_RESULT_TTL,
+    SHANGHAI_TZ,
     build_school_leave_docx,
     build_school_leave_run_docx,
     collect_pending_school_leave,
@@ -58,6 +59,11 @@ from ..school_leave import (
 
 
 router = APIRouter(prefix="/api/school-leave", tags=["school-leave"])
+
+
+def _database_timestamp_in_beijing(value: datetime) -> datetime:
+    """Convert naive UTC values from MySQL DATETIME defaults to Beijing local time."""
+    return value.replace(tzinfo=timezone.utc).astimezone(SHANGHAI_TZ).replace(tzinfo=None)
 
 
 def _result_out(result: SchoolLeaveGroupResult) -> SchoolLeaveGroupResultOut:
@@ -351,8 +357,8 @@ def admin_list_leave_records(
         if lower_bound is not None:
             generated_filters.append(
                 or_(
-                    and_(DailyLeaveEntry.window_id.is_(None), DailyLeaveEntry.end_at >= lower_bound),
-                    and_(DailyLeaveEntry.window_id.is_not(None), DailyLeaveWindow.end_at >= lower_bound),
+                    and_(DailyLeaveEntry.window_id.is_(None), DailyLeaveEntry.end_at > lower_bound),
+                    and_(DailyLeaveEntry.window_id.is_not(None), DailyLeaveWindow.end_at > lower_bound),
                 )
             )
         if upper_bound is not None:
@@ -380,7 +386,7 @@ def admin_list_leave_records(
                     student_id=entry.student_id_snapshot,
                     start_at=start_at,
                     end_at=end_at,
-                    recorded_at=entry.submitted_at,
+                    recorded_at=_database_timestamp_in_beijing(entry.submitted_at),
                     record_type="generated",
                     source_type="shared_activity" if is_shared else "self_service",
                     activity_title=window.title if window is not None else None,
@@ -392,7 +398,7 @@ def admin_list_leave_records(
         if search_pattern is not None:
             request_filters.append(SchoolLeaveRequest.member_name_snapshot.ilike(search_pattern, escape="\\"))
         if lower_bound is not None:
-            request_filters.append(SchoolLeaveRequest.end_at >= lower_bound)
+            request_filters.append(SchoolLeaveRequest.end_at > lower_bound)
         if upper_bound is not None:
             request_filters.append(SchoolLeaveRequest.start_at < upper_bound)
         request_rows = db.execute(
@@ -408,7 +414,7 @@ def admin_list_leave_records(
                     student_id=request.student_id_snapshot,
                     start_at=request.start_at,
                     end_at=request.end_at,
-                    recorded_at=request.created_at,
+                    recorded_at=_database_timestamp_in_beijing(request.created_at),
                     record_type="formal_application",
                     source_type="legacy_application",
                     activity_title=run.reason if run is not None else None,
