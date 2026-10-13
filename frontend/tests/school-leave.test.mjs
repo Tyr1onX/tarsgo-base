@@ -81,6 +81,16 @@ assert.match(publicPage, /restoreCapability\(saved\)/)
 assert.match(publicPage, /readyDownloadMatchesDraft/)
 assert.match(publicPage, /已隐藏原下载入口/)
 assert.doesNotMatch(publicPage, /getDownloadCredential|submissionCredential\.value\.studentId/)
+const publicGenerate = publicPage.indexOf("async function generate(")
+const publicPrepareResponse = publicPage.indexOf("const file = await api.generatePublicDailyLeaveDocument(props.token", publicGenerate)
+const publicResponseIdentityGuard = publicPage.indexOf(
+  "if (!samePublicSubmissionIdentity(identity, draftIdentity.value))",
+  publicPrepareResponse,
+)
+const publicAutoDownload = publicPage.indexOf("requestNativeDownload(readyDownload.value.download_url)", publicResponseIdentityGuard)
+assert.ok(publicPrepareResponse >= 0 && publicResponseIdentityGuard > publicPrepareResponse)
+assert.ok(publicAutoDownload > publicResponseIdentityGuard, "the post-response identity guard runs before automatic download")
+assert.match(publicPage, /等待期间表单身份已变化[\s\S]*?停止自动下载/)
 assert.match(publicPage, /请检查下载列表或文件管理器确认保存/)
 assert.match(publicPage, /网络请求未能完成/)
 assert.doesNotMatch(publicPage, /URL\.createObjectURL|URL\.revokeObjectURL/)

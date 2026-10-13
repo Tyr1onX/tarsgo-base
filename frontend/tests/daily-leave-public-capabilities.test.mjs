@@ -90,6 +90,26 @@ for (const changed of [
   assert.equal(samePublicSubmissionIdentity(originalIdentity, changed), false)
 }
 
+// A form edit while the preparation POST is pending prevents automatic use of
+// the response, even though that response belongs to a successfully saved item.
+let resolvePreparation
+const pendingPreparation = new Promise((resolve) => { resolvePreparation = resolve })
+let currentDraftIdentity = { ...originalIdentity }
+let automaticDownloads = 0
+const finishPreparation = (async () => {
+  const prepared = await pendingPreparation
+  if (!samePublicSubmissionIdentity(originalIdentity, currentDraftIdentity)) {
+    return { prepared, autoDownloaded: false }
+  }
+  automaticDownloads += 1
+  return { prepared, autoDownloaded: true }
+})()
+currentDraftIdentity = { ...originalIdentity, college: "art" }
+resolvePreparation({ download_url: "/prepared-file" })
+const changedDuringRequest = await finishPreparation
+assert.equal(changedDuringRequest.autoDownloaded, false)
+assert.equal(automaticDownloads, 0)
+
 assert.equal(listPublicCapabilities(storage, activityToken, now + PUBLIC_CAPABILITY_TTL_MS + 3).length, 0)
 assert.equal(storage.length, 0, "expired records are removed during the next list/cleanup")
 

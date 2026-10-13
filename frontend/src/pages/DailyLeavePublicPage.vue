@@ -200,6 +200,10 @@ async function generate(offline = false) {
       college: draft.value.college,
       download_credential: downloadCredential,
     }, offline)
+    if (!samePublicSubmissionIdentity(identity, draftIdentity.value)) {
+      error.value = "提交已保存，但等待期间表单身份已变化。为避免获取错误材料，已停止自动下载；请从本标签页恢复列表明确选择该提交。"
+      return
+    }
     readyDownload.value = {
       ...file,
       download_url: downloadUrlFor(file, offline),
