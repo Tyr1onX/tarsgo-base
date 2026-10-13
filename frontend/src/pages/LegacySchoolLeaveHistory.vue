@@ -84,8 +84,15 @@ async function markRead(record: AdminLeaveRecord) {
   }
 }
 
-function requestTypeLabel(requestType: "first_generation" | "repeat_download") {
-  return requestType === "first_generation" ? "首次生成请求" : "重复下载请求"
+function requestDescription(requestStage: "prepare" | "download", requestType: "first_generation" | "repeat_download") {
+  if (requestStage === "prepare") {
+    return requestType === "first_generation" ? "首次生成准备" : "重复准备请求"
+  }
+  return requestType === "first_generation" ? "首次文件请求" : "重复下载请求"
+}
+
+function requestStageLabel(requestStage: "prepare" | "download") {
+  return requestStage === "prepare" ? "POST 准备" : "GET 文件"
 }
 
 function applyFilters() {
@@ -181,7 +188,7 @@ onMounted(() => {
           </div>
           <div v-if="record.record_type === 'generated'">
             <dt>文件请求留痕</dt>
-            <dd>{{ record.document_request_count }} 次；仅表示发起请求，不代表下载成功</dd>
+            <dd>POST 准备 {{ record.prepare_request_count }} 次；GET 文件 {{ record.download_request_count }} 次。记录请求次数，不代表下载成功。</dd>
           </div>
           <div v-if="record.activity_title">
             <dt>{{ record.source_type === "shared_activity" ? "关联活动" : "关联旧版汇总" }}</dt>
@@ -204,7 +211,8 @@ onMounted(() => {
           <summary>查看文件请求（{{ record.document_request_count }} 次）</summary>
           <ul>
             <li v-for="request in record.document_requests" :key="request.id">
-              {{ dateTime(request.requested_at) }} · {{ requestTypeLabel(request.request_type) }} ·
+              {{ dateTime(request.requested_at) }} · {{ requestStageLabel(request.request_stage) }} ·
+              {{ requestDescription(request.request_stage, request.request_type) }} ·
               {{ request.file_version }}{{ request.offline ? "（线下签章版）" : "" }}
             </li>
           </ul>

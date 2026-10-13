@@ -173,7 +173,7 @@ def main() -> None:
                 select(func.count(DailyLeaveDocumentRequest.id)).where(
                     DailyLeaveDocumentRequest.entry_id == standalone_entry.id
                 )
-            ) == 1
+            ) == 2
             standalone_file = client.get(standalone_ready["download_url"])
             assert standalone_file.status_code == 200, standalone_file.text
             assert "attachment" in standalone_file.headers["content-disposition"].lower()
@@ -201,8 +201,13 @@ def main() -> None:
                     .order_by(DailyLeaveDocumentRequest.id)
                 )
             )
-            assert len(first_request_log) == 1
+            assert len(first_request_log) == 3
             assert first_request_log[0].request_type == "first_generation"
+            assert first_request_log[0].request_stage == "prepare"
+            assert first_request_log[1].request_stage == "download"
+            assert first_request_log[1].request_type == "first_generation"
+            assert first_request_log[2].request_stage == "download"
+            assert first_request_log[2].request_type == "repeat_download"
             assert first_request_log[0].file_version == "daily-leave-v2"
             standalone_offline = client.post(
                 "/api/daily-leave/self-service/document?offline=true", json=standalone_payload
@@ -220,8 +225,13 @@ def main() -> None:
                     .order_by(DailyLeaveDocumentRequest.id)
                 )
             )
-            assert [item.request_type for item in request_logs] == ["first_generation", "repeat_download"]
-            assert [item.offline for item in request_logs] == [False, True]
+            assert [item.request_stage for item in request_logs] == [
+                "prepare", "download", "download", "prepare", "download"
+            ]
+            assert [item.request_type for item in request_logs] == [
+                "first_generation", "first_generation", "repeat_download", "repeat_download", "repeat_download"
+            ]
+            assert [item.offline for item in request_logs] == [False, False, False, True, True]
             assert db.scalar(
                 select(func.count(AdminUpdateEvent.id)).where(
                     AdminUpdateEvent.event_type == "leave_record_created",
@@ -230,6 +240,12 @@ def main() -> None:
                 )
             ) == 1
             assert client.get(standalone_ready["download_url"]).content == standalone_file.content
+            assert db.scalar(
+                select(func.count(AdminUpdateEvent.id)).where(
+                    AdminUpdateEvent.entity_type == "daily_leave_entry",
+                    AdminUpdateEvent.entity_id == standalone_entry.id,
+                )
+            ) == 1
 
             assert client.post(
                 "/api/daily-leave/self-service/document",
@@ -319,8 +335,63 @@ def main() -> None:
                     AdminUpdateEvent.entity_id == raced_entry.id,
                 )
             ) == 1
+            download_barrier = Barrier(2)
+
+            def concurrent_file_request() -> int:
+                with TestClient(app) as concurrent_client:
+                    download_barrier.wait(timeout=10)
+                    response = concurrent_client.get(
+                        f"/api/daily-leave/self-service/document/{raced_entry.id}"
+                    )
+                    return response.status_code
+
+            db.commit()
+            previous_db_override = app.dependency_overrides[get_db]
+            app.dependency_overrides[get_db] = independent_request_db
+            try:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    download_statuses = list(executor.map(lambda _: concurrent_file_request(), range(2)))
+            finally:
+                app.dependency_overrides[get_db] = previous_db_override
+                db.expire_all()
+            assert download_statuses == [200, 200]
+            raced_download_types = list(
+                db.scalars(
+                    select(DailyLeaveDocumentRequest.request_type)
+                    .where(
+                        DailyLeaveDocumentRequest.entry_id == raced_entry.id,
+                        DailyLeaveDocumentRequest.request_stage == "download",
+                    )
+                    .order_by(DailyLeaveDocumentRequest.id)
+                )
+            )
+            assert raced_download_types == ["first_generation", "repeat_download"]
+            assert db.scalar(
+                select(func.count(DailyLeaveEntry.id)).where(
+                    DailyLeaveEntry.window_id.is_(None),
+                    DailyLeaveEntry.member_id == formal.id,
+                    DailyLeaveEntry.start_at == race_start,
+                    DailyLeaveEntry.end_at == race_start.replace(hour=17, minute=10),
+                )
+            ) == 1
+            assert db.scalar(
+                select(func.count(AdminUpdateEvent.id)).where(
+                    AdminUpdateEvent.entity_type == "daily_leave_entry",
+                    AdminUpdateEvent.entity_id == raced_entry.id,
+                )
+            ) == 1
             set_actor(reserve)
+            request_count_before_forbidden_download = db.scalar(
+                select(func.count(DailyLeaveDocumentRequest.id)).where(
+                    DailyLeaveDocumentRequest.entry_id == standalone_entry.id
+                )
+            )
             assert client.get(standalone_ready["download_url"]).status_code == 404
+            assert db.scalar(
+                select(func.count(DailyLeaveDocumentRequest.id)).where(
+                    DailyLeaveDocumentRequest.entry_id == standalone_entry.id
+                )
+            ) == request_count_before_forbidden_download
             set_actor(formal)
             set_actor(incomplete)
             assert client.post("/api/daily-leave/self-service/document", json=standalone_payload).status_code == 409
@@ -518,7 +589,12 @@ def main() -> None:
                     .order_by(DailyLeaveDocumentRequest.id)
                 )
             )
+            assert [item.request_stage for item in public_request_logs] == [
+                "prepare", "prepare", "download", "prepare", "download"
+            ]
             assert [item.request_type for item in public_request_logs] == [
+                "first_generation",
+                "repeat_download",
                 "first_generation",
                 "repeat_download",
                 "repeat_download",
@@ -835,9 +911,19 @@ def main() -> None:
             assert self_service_row["id"] == f"generated:{legacy_duplicate.id}"
             assert self_service_row["generation_count"] == 2
             assert len(self_service_row["generation_times"]) == 2
-            assert self_service_row["document_request_count"] == 2
+            assert self_service_row["document_request_count"] == 7
+            assert self_service_row["prepare_request_count"] == 2
+            assert self_service_row["download_request_count"] == 5
+            assert [item["request_stage"] for item in self_service_row["document_requests"]] == [
+                "prepare", "download", "download", "prepare", "download", "download", "download"
+            ]
             assert [item["request_type"] for item in self_service_row["document_requests"]] == [
                 "first_generation",
+                "first_generation",
+                "repeat_download",
+                "repeat_download",
+                "repeat_download",
+                "repeat_download",
                 "repeat_download",
             ]
             assert {item["file_version"] for item in self_service_row["document_requests"]} == {
@@ -934,6 +1020,72 @@ def main() -> None:
             new_application = new_application_record.json()[0]
             assert new_application["is_unread"] is True
             assert len(new_application["update_event_ids"]) == 1
+
+            legacy_application_rows = client.get(
+                "/api/school-leave/admin/records",
+                params={
+                    "name": "历史申请人",
+                    "date_from": (now + timedelta(days=1)).date().isoformat(),
+                    "record_type": "formal_application",
+                },
+            )
+            assert legacy_application_rows.status_code == 200
+            legacy_application = legacy_application_rows.json()[0]
+            assert legacy_application["is_unread"] is False
+            assert legacy_application["update_event_ids"] == []
+
+            admin_unread_before_delete = client.get("/api/admin-updates/unread-count").json()["unread_count"]
+            set_actor(second_admin)
+            second_admin_unread_before_delete = client.get("/api/admin-updates/unread-count").json()["unread_count"]
+            set_actor(admin)
+            deletable_run = SchoolLeaveRun(
+                collected_at=local_now(),
+                created_by=admin.id,
+                reason="leave request deletion audit fixture",
+                status="completed",
+            )
+            db.add(deletable_run)
+            db.flush()
+            legacy_run_ids.add(deletable_run.id)
+            deletable_request = SchoolLeaveRequest(
+                member_id=formal.id,
+                start_at=leave_request_start + timedelta(days=1),
+                end_at=leave_request_start + timedelta(days=1, hours=2),
+                member_name_snapshot="待删除历史申请",
+                student_id_snapshot="26000201",
+                status="included",
+                run_id=deletable_run.id,
+            )
+            db.add(deletable_request)
+            db.flush()
+            deletable_event = AdminUpdateEvent(
+                event_type="leave_record_created",
+                entity_type="school_leave_request",
+                entity_id=deletable_request.id,
+            )
+            db.add(deletable_event)
+            db.flush()
+            deletable_read = AdminUpdateRead(event_id=deletable_event.id, admin_id=admin.id)
+            db.add(deletable_read)
+            db.commit()
+            deletable_run_id = deletable_run.id
+            deletable_request_id = deletable_request.id
+            deletable_event_id = deletable_event.id
+            deletable_read_id = deletable_read.id
+            assert client.get("/api/admin-updates/unread-count").json()["unread_count"] == admin_unread_before_delete
+            set_actor(second_admin)
+            assert client.get("/api/admin-updates/unread-count").json()["unread_count"] == second_admin_unread_before_delete + 1
+            set_actor(admin)
+            deleted_history = client.delete(f"/api/school-leave/admin/runs/{deletable_run_id}")
+            assert deleted_history.status_code == 204, deleted_history.text
+            db.expire_all()
+            assert db.get(SchoolLeaveRequest, deletable_request_id) is None
+            assert db.get(AdminUpdateEvent, deletable_event_id) is None
+            assert db.get(AdminUpdateRead, deletable_read_id) is None
+            assert client.get("/api/admin-updates/unread-count").json()["unread_count"] == admin_unread_before_delete
+            set_actor(second_admin)
+            assert client.get("/api/admin-updates/unread-count").json()["unread_count"] == second_admin_unread_before_delete
+            set_actor(admin)
 
             shared_entry = db.scalar(
                 select(DailyLeaveEntry).where(

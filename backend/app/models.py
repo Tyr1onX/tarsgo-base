@@ -333,10 +333,19 @@ class DailyLeaveDocumentRequest(Base):
     __tablename__ = "daily_leave_document_requests"
     __table_args__ = (
         CheckConstraint(
+            "request_stage IN ('prepare','download')",
+            name="ck_daily_leave_document_requests_stage",
+        ),
+        CheckConstraint(
             "request_type IN ('first_generation','repeat_download')",
             name="ck_daily_leave_document_requests_type",
         ),
-        Index("ix_daily_leave_document_requests_entry_requested", "entry_id", "requested_at"),
+        Index(
+            "ix_daily_leave_document_requests_entry_stage_requested",
+            "entry_id",
+            "request_stage",
+            "requested_at",
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -346,6 +355,7 @@ class DailyLeaveDocumentRequest(Base):
     requested_by_member_id: Mapped[int | None] = mapped_column(
         ForeignKey("members.id", ondelete="SET NULL"), nullable=True
     )
+    request_stage: Mapped[str] = mapped_column(String(20), nullable=False)
     request_type: Mapped[str] = mapped_column(String(30), nullable=False)
     file_version: Mapped[str] = mapped_column(String(50), nullable=False)
     offline: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

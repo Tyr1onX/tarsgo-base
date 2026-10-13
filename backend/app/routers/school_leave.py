@@ -471,6 +471,7 @@ def admin_list_leave_records(
             document_requests = [
                 DailyLeaveDocumentRequestOut(
                     id=request_log.id,
+                    request_stage=request_log.request_stage,
                     request_type=request_log.request_type,
                     file_version=request_log.file_version,
                     offline=request_log.offline,
@@ -499,6 +500,14 @@ def admin_list_leave_records(
                     generation_count=len(group),
                     generation_times=generation_times,
                     document_request_count=len(document_requests),
+                    prepare_request_count=sum(
+                        request_log.request_stage == "prepare"
+                        for request_log in document_requests
+                    ),
+                    download_request_count=sum(
+                        request_log.request_stage == "download"
+                        for request_log in document_requests
+                    ),
                     document_requests=document_requests,
                     is_unread=any(event_id not in generated_read_ids for event_id in update_event_ids),
                     update_event_ids=update_event_ids,
@@ -669,6 +678,13 @@ def delete_run_history(
                 )
             )
         if linked_requests:
+            db.execute(
+                delete(AdminUpdateEvent).where(
+                    AdminUpdateEvent.event_type == "leave_record_created",
+                    AdminUpdateEvent.entity_type == "school_leave_request",
+                    AdminUpdateEvent.entity_id.in_([request.id for request in linked_requests]),
+                )
+            )
             db.execute(
                 delete(SchoolLeaveRequest).where(
                     SchoolLeaveRequest.id.in_([request.id for request in linked_requests])

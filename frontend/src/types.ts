@@ -234,8 +234,11 @@ export interface AdminLeaveRecord {
   generation_count: number
   generation_times: string[]
   document_request_count: number
+  prepare_request_count: number
+  download_request_count: number
   document_requests: {
     id: number
+    request_stage: "prepare" | "download"
     request_type: "first_generation" | "repeat_download"
     file_version: string
     offline: boolean

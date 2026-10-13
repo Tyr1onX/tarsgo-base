@@ -17,6 +17,7 @@ SchoolLeaveResultState = Literal["available", "cleared"]
 AdminLeaveRecordType = Literal["generated", "formal_application"]
 AdminLeaveRecordSource = Literal["self_service", "shared_activity", "legacy_application"]
 DailyLeaveDocumentRequestType = Literal["first_generation", "repeat_download"]
+DailyLeaveDocumentRequestStage = Literal["prepare", "download"]
 CampLeaveType = Literal["winter", "summer"]
 CampLeaveStatus = Literal["collecting", "closed"]
 CampLeaveParticipantType = Literal["formal", "reserve", "other"]
@@ -315,6 +316,7 @@ class SchoolLeaveRequestOut(BaseModel):
 
 class DailyLeaveDocumentRequestOut(BaseModel):
     id: int
+    request_stage: DailyLeaveDocumentRequestStage
     request_type: DailyLeaveDocumentRequestType
     file_version: str
     offline: bool
@@ -337,6 +339,8 @@ class AdminLeaveRecordOut(BaseModel):
     generation_count: int = 1
     generation_times: list[datetime] = Field(default_factory=list)
     document_request_count: int = 0
+    prepare_request_count: int = 0
+    download_request_count: int = 0
     document_requests: list[DailyLeaveDocumentRequestOut] = Field(default_factory=list)
     is_unread: bool = False
     update_event_ids: list[int] = Field(default_factory=list)

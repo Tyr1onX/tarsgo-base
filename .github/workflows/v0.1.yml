@@ -47,6 +47,7 @@ jobs:
         run: |
           cd frontend
           npm ci
+          npm audit --audit-level=high
           npm run build
 
       - name: Build and start
@@ -152,6 +153,8 @@ jobs:
           test "$DAILY_ENTRY_TIME_COLUMNS" = "2"
           LEAVE_AUDIT_TABLES="$(docker compose exec -T db mysql -uroot -p"$CI_MYSQL_ROOT_PASSWORD" -N -B -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'tarsgo_migration' AND table_name IN ('daily_leave_document_requests', 'admin_update_events', 'admin_update_reads')")"
           test "$LEAVE_AUDIT_TABLES" = "3"
+          LEAVE_REQUEST_STAGE_COLUMN="$(docker compose exec -T db mysql -uroot -p"$CI_MYSQL_ROOT_PASSWORD" -N -B -e "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = 'tarsgo_migration' AND table_name = 'daily_leave_document_requests' AND column_name = 'request_stage' AND is_nullable = 'NO'")"
+          test "$LEAVE_REQUEST_STAGE_COLUMN" = "1"
           HISTORICAL_AUDIT_ROWS="$(docker compose exec -T db mysql -uroot -p"$CI_MYSQL_ROOT_PASSWORD" -N -B tarsgo_migration -e "SELECT CONCAT((SELECT COUNT(*) FROM daily_leave_document_requests), '|', (SELECT COUNT(*) FROM admin_update_events), '|', (SELECT COUNT(*) FROM admin_update_reads))")"
           test "$HISTORICAL_AUDIT_ROWS" = "0|0|0"
           LEGACY_RUN="$(docker compose exec -T db mysql -uroot -p"$CI_MYSQL_ROOT_PASSWORD" -N -B tarsgo_migration -e "SELECT CONCAT(status, '|', DATE_FORMAT(downloaded_at, '%Y-%m-%d %H:%i:%s'), '|', downloaded_by) FROM school_leave_runs WHERE id = 200")"

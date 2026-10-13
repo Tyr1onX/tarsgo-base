@@ -160,22 +160,24 @@ def _record_document_request(
     db: Session,
     entry: DailyLeaveEntry,
     *,
+    request_stage: str,
     requested_by_member_id: int | None,
     first_generation: bool,
     offline: bool,
 ) -> None:
-    # This records the user's file request. The later document response may still fail,
-    # so this event must not be interpreted as a successful download.
+    # Record each HTTP request before document generation. The response may still fail,
+    # so these rows describe requests, not successful downloads.
     db.add(
         DailyLeaveDocumentRequest(
             entry_id=entry.id,
             requested_by_member_id=requested_by_member_id,
+            request_stage=request_stage,
             request_type="first_generation" if first_generation else "repeat_download",
             file_version=DAILY_LEAVE_DOCUMENT_VERSION,
             offline=offline,
         )
     )
-    if first_generation:
+    if request_stage == "prepare" and first_generation:
         db.add(
             AdminUpdateEvent(
                 event_type="leave_record_created",
@@ -327,6 +329,7 @@ def member_document(
     _record_document_request(
         db,
         entry,
+        request_stage="prepare",
         requested_by_member_id=current.id,
         first_generation=first_generation,
         offline=offline,
@@ -357,10 +360,27 @@ def member_document_download(
         select(DailyLeaveEntry).where(
             DailyLeaveEntry.window_id == window.id,
             DailyLeaveEntry.member_id == current.id,
-        )
+        ).with_for_update()
     )
     if entry is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="请先生成该共享活动的请假材料")
+    first_generation = db.scalar(
+        select(DailyLeaveDocumentRequest.id)
+        .where(
+            DailyLeaveDocumentRequest.entry_id == entry.id,
+            DailyLeaveDocumentRequest.request_stage == "download",
+        )
+        .limit(1)
+    ) is None
+    _record_document_request(
+        db,
+        entry,
+        request_stage="download",
+        requested_by_member_id=current.id,
+        first_generation=first_generation,
+        offline=offline,
+    )
+    db.commit()
     content = _make_document(
         start_at=window.start_at,
         end_at=window.end_at,
@@ -410,6 +430,7 @@ def self_service_document(
     _record_document_request(
         db,
         entry,
+        request_stage="prepare",
         requested_by_member_id=current.id,
         first_generation=first_generation,
         offline=offline,
@@ -434,12 +455,29 @@ def self_service_document_download(
             DailyLeaveEntry.id == entry_id,
             DailyLeaveEntry.window_id.is_(None),
             DailyLeaveEntry.member_id == current.id,
-        )
+        ).with_for_update()
     )
     if entry is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="请先生成该时段的请假材料")
     if entry.start_at is None or entry.end_at is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="该记录没有有效的请假时段")
+    first_generation = db.scalar(
+        select(DailyLeaveDocumentRequest.id)
+        .where(
+            DailyLeaveDocumentRequest.entry_id == entry.id,
+            DailyLeaveDocumentRequest.request_stage == "download",
+        )
+        .limit(1)
+    ) is None
+    _record_document_request(
+        db,
+        entry,
+        request_stage="download",
+        requested_by_member_id=current.id,
+        first_generation=first_generation,
+        offline=offline,
+    )
+    db.commit()
     content = _make_document(
         start_at=entry.start_at,
         end_at=entry.end_at,
@@ -489,6 +527,7 @@ def public_document(
             _record_document_request(
                 db,
                 entry,
+                request_stage="prepare",
                 requested_by_member_id=None,
                 first_generation=False,
                 offline=offline,
@@ -519,6 +558,7 @@ def public_document(
         _record_document_request(
             db,
             entry,
+            request_stage="prepare",
             requested_by_member_id=None,
             first_generation=True,
             offline=offline,
@@ -555,7 +595,9 @@ def public_document_download(
     ):
         raise missing_credential()
     entry = db.scalar(
-        select(DailyLeaveEntry).where(DailyLeaveEntry.public_download_token_hash == hash_token(credential))
+        select(DailyLeaveEntry)
+        .where(DailyLeaveEntry.public_download_token_hash == hash_token(credential))
+        .with_for_update()
     )
     if entry is None or entry.window_id is None or entry.public_download_expires_at is None:
         raise missing_credential()
@@ -568,6 +610,23 @@ def public_document_download(
     window = db.get(DailyLeaveWindow, entry.window_id)
     if window is None:
         raise missing_credential()
+    first_generation = db.scalar(
+        select(DailyLeaveDocumentRequest.id)
+        .where(
+            DailyLeaveDocumentRequest.entry_id == entry.id,
+            DailyLeaveDocumentRequest.request_stage == "download",
+        )
+        .limit(1)
+    ) is None
+    _record_document_request(
+        db,
+        entry,
+        request_stage="download",
+        requested_by_member_id=None,
+        first_generation=first_generation,
+        offline=offline,
+    )
+    db.commit()
     content = _make_document(
         start_at=window.start_at,
         end_at=window.end_at,

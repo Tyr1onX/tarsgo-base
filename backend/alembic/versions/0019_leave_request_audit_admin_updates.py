@@ -23,6 +23,7 @@ def upgrade() -> None:
         sa.Column("id", sa.Integer(), nullable=False),
         sa.Column("entry_id", sa.Integer(), nullable=False),
         sa.Column("requested_by_member_id", sa.Integer(), nullable=True),
+        sa.Column("request_stage", sa.String(length=20), nullable=False),
         sa.Column("request_type", sa.String(length=30), nullable=False),
         sa.Column("file_version", sa.String(length=50), nullable=False),
         sa.Column("offline", sa.Boolean(), nullable=False),
@@ -31,14 +32,18 @@ def upgrade() -> None:
             "request_type IN ('first_generation','repeat_download')",
             name="ck_daily_leave_document_requests_type",
         ),
+        sa.CheckConstraint(
+            "request_stage IN ('prepare','download')",
+            name="ck_daily_leave_document_requests_stage",
+        ),
         sa.ForeignKeyConstraint(["entry_id"], ["daily_leave_entries.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["requested_by_member_id"], ["members.id"], ondelete="SET NULL"),
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index(
-        "ix_daily_leave_document_requests_entry_requested",
+        "ix_daily_leave_document_requests_entry_stage_requested",
         "daily_leave_document_requests",
-        ["entry_id", "requested_at"],
+        ["entry_id", "request_stage", "requested_at"],
     )
 
     op.create_table(
@@ -75,7 +80,7 @@ def downgrade() -> None:
     op.drop_index("ix_admin_update_events_created", table_name="admin_update_events")
     op.drop_table("admin_update_events")
     op.drop_index(
-        "ix_daily_leave_document_requests_entry_requested",
+        "ix_daily_leave_document_requests_entry_stage_requested",
         table_name="daily_leave_document_requests",
     )
     op.drop_table("daily_leave_document_requests")
