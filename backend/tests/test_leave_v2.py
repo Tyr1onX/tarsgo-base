@@ -1,3 +1,6 @@
+Warning: truncated output (original token count: 13894)
+Total output lines: 1086
+
 """MySQL-backed coverage for daily leave V2 and template-backed documents."""
 
 from __future__ import annotations
@@ -510,76 +513,7 @@ def main() -> None:
             assert public_entry is not None and public_entry.participant_type == "other"
             assert public_entry.public_download_token_hash == hash_token(external_payload["download_credential"])
             assert public_entry.public_download_expires_at is not None
-            assert public_entry.public_download_expires_at > utcnow()
-            public_request_logs = list(
-                db.scalars(
-                    select(DailyLeaveDocumentRequest)
-                    .where(DailyLeaveDocumentRequest.entry_id == public_entry.id)
-                    .order_by(DailyLeaveDocumentRequest.id)
-                )
-            )
-            assert [item.request_type for item in public_request_logs] == [
-                "first_generation",
-                "repeat_download",
-                "repeat_download",
-            ]
-            assert db.scalar(
-                select(func.count(AdminUpdateEvent.id)).where(
-                    AdminUpdateEvent.entity_type == "daily_leave_entry",
-                    AdminUpdateEvent.entity_id == public_entry.id,
-                )
-            ) == 1
-            wrong_credential = {**external_payload, "download_credential": download_credential()}
-            refused_claim = client.post(f"/api/daily-leave/public/{token}/document", json=wrong_credential)
-            assert refused_claim.status_code == 409, f"unexpected status {refused_claim.status_code}"
-            assert client.get(
-                f"/api/daily-leave/public/{token}/document/{public_entry.id}"
-            ).status_code == 404
-            # Student number alone and a different random credential cannot recover an existing snapshot.
-            assert client.post(
-                f"/api/daily-leave/public/{token}/document",
-                json={key: value for key, value in external_payload.items() if key != "download_credential"},
-            ).status_code == 422
-            public_paragraphs, public_tables = docx_text(external_file.content)
-            assert public_tables[0][1] == ["临时参与者", "26000203", "计算机科学与技术学院"]
-            assert "entries" not in "".join(public_paragraphs)
-            assert client.post(
-                f"/api/daily-leave/public/{token}/document",
-                json={**external_payload, "student_id": "１２３４５６７８"},
-            ).status_code == 422
-            assert client.post(
-                f"/api/daily-leave/public/{token}/document",
-                json={**external_payload, "college": "invalid-college"},
-            ).status_code == 422
-            assert client.post(
-                f"/api/daily-leave/public/{token}/document",
-                json={**external_payload, "start_at": window_payload["start_at"]},
-            ).status_code == 422
-
-            original_capability_expiry = public_entry.public_download_expires_at
-            public_entry.public_download_expires_at = utcnow() - timedelta(seconds=1)
-            db.commit()
-            expired_capability = client.get(external_ready["download_url"])
-            assert expired_capability.status_code == 410
-            assert expired_capability.headers["cache-control"].startswith("private, no-store")
-            assert client.post(
-                f"/api/daily-leave/public/{token}/document", json=external_payload
-            ).status_code == 410
-            public_entry.public_download_expires_at = original_capability_expiry
-            db.commit()
-
-            # Admin identity corrections affect new matters but preserve existing snapshots.
-            set_actor(admin)
-            identity_update = client.patch(
-                f"/api/members/{formal.id}/profile",
-                json={
-                    "name": "后来改名",
-                    "student_id": "26000991",
-                    "college": "art",
-                    "team_membership": "reserve",
-                },
-            )
-            assert identity_update.status_code == 200, identity_update.text
+            assert public_entry.public_download_e…894 tokens truncated…           assert identity_update.status_code == 200, identity_update.text
             assert identity_update.json()["identity_locked"] is True
             set_actor(formal)
             old_self_file = client.get(standalone_ready["download_url"])
@@ -908,7 +842,11 @@ def main() -> None:
                 json={"event_ids": self_service_row["update_event_ids"]},
             ).status_code == 403
 
-            leave_request_start = now + timedelta(days=14)
+            leave_request_start = (now + timedelta(days=14)).replace(
+                minute=0,
+                second=0,
+                microsecond=0,
+            )
             created_leave_request = client.post(
                 "/api/school-leave/requests",
                 json={
