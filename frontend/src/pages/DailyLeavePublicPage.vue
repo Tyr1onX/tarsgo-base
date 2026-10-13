@@ -1,22 +1,58 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue"
+import { computed, onMounted, ref } from "vue"
 
 import { ApiError, api } from "../api"
 import ActionMenu from "../components/ActionMenu.vue"
 import CollegeSelect from "../components/CollegeSelect.vue"
+import {
+  listPublicCapabilities,
+  removePublicCapability,
+  samePublicSubmissionIdentity,
+  savePublicCapability,
+} from "../dailyLeavePublicCapabilities.js"
 import type { CollegeOption, DailyLeavePublicWindow } from "../types"
+
+interface SubmissionIdentity {
+  activityToken: string
+  name: string
+  studentId: string
+  college: string
+}
+
+interface SavedCapability extends SubmissionIdentity {
+  credential: string
+  createdAt: number
+  expiresAt: number
+  storageId: string
+}
+
+interface ReadyDownload {
+  download_url: string
+  filename: string
+  identity: SubmissionIdentity
+}
 
 const props = defineProps<{ token: string }>()
 const windowInfo = ref<DailyLeavePublicWindow | null>(null)
 const colleges = ref<CollegeOption[]>([])
 const loading = ref(true)
 const saving = ref(false)
-const downloaded = ref(false)
+const hasPreparedDocument = ref(false)
 const error = ref("")
-const readyDownload = ref<{ download_url: string; filename: string } | null>(null)
+const readyDownload = ref<ReadyDownload | null>(null)
 const fieldErrors = ref<Record<string, string>>({})
 const draft = ref({ name: "", student_id: "", college: "" })
-const submissionCredential = ref<{ token: string; studentId: string; value: string } | null>(null)
+const savedCapabilities = ref<SavedCapability[]>([])
+const persistenceWarning = ref("")
+const draftIdentity = computed<SubmissionIdentity>(() => ({
+  activityToken: props.token,
+  name: draft.value.name.trim(),
+  studentId: draft.value.student_id.trim(),
+  college: draft.value.college,
+}))
+const readyDownloadMatchesDraft = computed(() =>
+  samePublicSubmissionIdentity(readyDownload.value?.identity, draftIdentity.value),
+)
 
 function dateTime(value: string) {
   return value.slice(0, 16).replace("T", " ")
@@ -24,7 +60,7 @@ function dateTime(value: string) {
 
 function messageOf(reason: unknown) {
   if (reason instanceof TypeError) {
-    return "网络请求未能完成。请检查网络后重试；已提交的记录只能通过首次下载凭证访问，凭证遗失请联系活动管理员核验身份。"
+    return "网络请求未能完成。若提交已保存，请从下方本标签页的恢复记录继续；凭证遗失时不能仅凭姓名或学号找回，请联系活动管理员核验身份。"
   }
   return reason instanceof Error ? reason.message : "操作失败"
 }
@@ -37,13 +73,41 @@ function newDownloadCredential() {
   return btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "")
 }
 
-function getDownloadCredential(token: string, studentId: string) {
-  if (submissionCredential.value?.token === token && submissionCredential.value.studentId === studentId) {
-    return submissionCredential.value.value
+function sessionStorageOrNull() {
+  try {
+    return window.sessionStorage
+  } catch {
+    return null
   }
-  const credential = newDownloadCredential()
-  submissionCredential.value = { token, studentId, value: credential }
-  return credential
+}
+
+function refreshSavedCapabilities() {
+  const storage = sessionStorageOrNull()
+  savedCapabilities.value = listPublicCapabilities(storage, props.token) as SavedCapability[]
+  if (!storage) {
+    persistenceWarning.value = "当前浏览器不允许暂存本标签页恢复凭证；若刷新或关闭页面，已提交材料可能无法自行恢复。"
+  }
+}
+
+function rememberCapability(identity: SubmissionIdentity, credential: string) {
+  const saved = savePublicCapability(
+    sessionStorageOrNull(),
+    props.token,
+    {
+      name: identity.name,
+      studentId: identity.studentId,
+      college: identity.college,
+    },
+    credential,
+    window.crypto,
+  ) as SavedCapability | null
+  if (saved) {
+    persistenceWarning.value = ""
+    refreshSavedCapabilities()
+  } else {
+    persistenceWarning.value = "本浏览器未能暂存恢复凭证。若请求已保存但页面刷新，可能无法自行恢复，请先确认下载结果。"
+  }
+  return saved
 }
 
 function downloadUrlFor(file: { download_url: string; filename: string }, offline: boolean) {
@@ -75,6 +139,7 @@ function clearFieldError(field: string) {
 
 async function load() {
   loading.value = true
+  refreshSavedCapabilities()
   try {
     const [eventInfo, options] = await Promise.all([
       api.publicDailyLeaveWindow(props.token),
@@ -94,16 +159,20 @@ async function generate(offline = false) {
   error.value = ""
   fieldErrors.value = {}
   if (readyDownload.value) {
-    readyDownload.value = {
-      ...readyDownload.value,
-      download_url: downloadUrlFor(readyDownload.value, offline),
+    if (readyDownloadMatchesDraft.value) {
+      readyDownload.value = {
+        ...readyDownload.value,
+        download_url: downloadUrlFor(readyDownload.value, offline),
+      }
+      try {
+        requestNativeDownload(readyDownload.value.download_url)
+      } catch {
+        error.value = "文件请求未能启动，请点击下方下载链接继续。"
+      }
+      return
     }
-    try {
-      requestNativeDownload(readyDownload.value.download_url)
-    } catch {
-      error.value = "文件请求未能启动，请点击下方下载链接继续。"
-    }
-    return
+    readyDownload.value = null
+    hasPreparedDocument.value = false
   }
   const name = draft.value.name.trim()
   const studentId = draft.value.student_id.trim()
@@ -114,15 +183,29 @@ async function generate(offline = false) {
 
   saving.value = true
   try {
-    const downloadCredential = getDownloadCredential(props.token, studentId)
+    const identity: SubmissionIdentity = {
+      activityToken: props.token,
+      name,
+      studentId,
+      college: draft.value.college,
+    }
+    // Persist the bearer credential before the POST. If the server commits but
+    // this browser times out before reading the response, the same tab can
+    // explicitly recover it after a refresh without an ID-based lookup.
+    const downloadCredential = newDownloadCredential()
+    rememberCapability(identity, downloadCredential)
     const file = await api.generatePublicDailyLeaveDocument(props.token, {
       name,
       student_id: studentId,
       college: draft.value.college,
       download_credential: downloadCredential,
     }, offline)
-    readyDownload.value = { ...file, download_url: downloadUrlFor(file, offline) }
-    downloaded.value = true
+    readyDownload.value = {
+      ...file,
+      download_url: downloadUrlFor(file, offline),
+      identity,
+    }
+    hasPreparedDocument.value = true
     requestNativeDownload(readyDownload.value.download_url)
   } catch (reason) {
     if (reason instanceof ApiError && reason.field) setFieldError(reason.field, reason.message)
@@ -130,6 +213,49 @@ async function generate(offline = false) {
   } finally {
     saving.value = false
   }
+}
+
+async function restoreCapability(saved: SavedCapability, offline = false) {
+  if (saving.value) return
+  error.value = ""
+  fieldErrors.value = {}
+  saving.value = true
+  const identity: SubmissionIdentity = {
+    activityToken: saved.activityToken,
+    name: saved.name,
+    studentId: saved.studentId,
+    college: saved.college,
+  }
+  try {
+    // Recovery is an explicit action on a tab-local bearer capability, never
+    // an automatic lookup triggered by entering a student number.
+    const file = await api.generatePublicDailyLeaveDocument(props.token, {
+      name: saved.name,
+      student_id: saved.studentId,
+      college: saved.college,
+      download_credential: saved.credential,
+    }, offline)
+    draft.value = { name: saved.name, student_id: saved.studentId, college: saved.college }
+    readyDownload.value = {
+      ...file,
+      download_url: downloadUrlFor(file, offline),
+      identity,
+    }
+    hasPreparedDocument.value = true
+    requestNativeDownload(readyDownload.value.download_url)
+  } catch (reason) {
+    if (reason instanceof ApiError && reason.status === 410) {
+      removePublicCapability(sessionStorageOrNull(), props.token, saved.storageId)
+      refreshSavedCapabilities()
+    }
+    error.value = messageOf(reason)
+  } finally {
+    saving.value = false
+  }
+}
+
+function maskedStudentId(studentId: string) {
+  return `${"•".repeat(Math.max(0, studentId.length - 2))}${studentId.slice(-2)}`
 }
 
 function onMenuAction(action: string) {
@@ -156,10 +282,26 @@ onMounted(load)
         <p v-if="windowInfo.accepting_participants" class="daily-public-hint">填写本人信息后即可下载个人请假条。时间固定，不能修改。</p>
         <p v-else class="daily-public-hint">此活动已关闭或截止，不能新增报名。若此前已提交，可在本浏览器仍保留下载凭证时恢复下载；凭证遗失请联系活动管理员核验身份。</p>
         <p v-if="error" class="daily-public-error" role="alert">{{ error }}</p>
-        <p v-if="readyDownload" class="daily-public-muted" role="status">
+        <p v-if="persistenceWarning" class="daily-public-hint" role="status">{{ persistenceWarning }}</p>
+        <p v-if="readyDownload && readyDownloadMatchesDraft" class="daily-public-muted" role="status">
           报名已保存，已向浏览器发起请假条文件请求。请检查下载列表或文件管理器确认保存；若未看到文件，
           <a :href="readyDownload.download_url" referrerpolicy="no-referrer">点击此处重新下载</a>。
         </p>
+        <p v-else-if="readyDownload" class="daily-public-error" role="alert">
+          当前表单身份与已准备材料不一致，已隐藏原下载入口。请从下方恢复列表明确选择原材料，或使用其他身份重新提交。
+        </p>
+        <section v-if="savedCapabilities.length" class="daily-public-recovery" aria-label="本标签页可恢复的提交">
+          <h2>本标签页可恢复的提交</h2>
+          <p class="daily-public-muted">恢复记录使用本标签页保存的下载凭证，不会按姓名或学号重新领取。凭证有效期为 7 天。</p>
+          <ul>
+            <li v-for="saved in savedCapabilities" :key="saved.storageId">
+              <span>{{ saved.name }} · 学号尾号 {{ maskedStudentId(saved.studentId) }} · {{ new Date(saved.createdAt).toLocaleString() }}</span>
+              <button type="button" :disabled="saving" @click="restoreCapability(saved)">
+                {{ saving ? "正在恢复…" : "恢复并获取材料" }}
+              </button>
+            </li>
+          </ul>
+        </section>
         <form @submit.prevent="generate(false)">
           <label>
             姓名
@@ -183,7 +325,7 @@ onMounted(load)
             <small v-if="fieldErrors.college" class="daily-public-error">{{ fieldErrors.college }}</small>
           </label>
           <div class="daily-public-actions">
-            <button class="primary" type="submit" :disabled="saving">{{ saving ? "正在准备文件…" : downloaded ? "重新下载请假条" : windowInfo.accepting_participants ? "生成并下载请假条" : "恢复已提交材料" }}</button>
+            <button class="primary" type="submit" :disabled="saving">{{ saving ? "正在准备文件…" : hasPreparedDocument && readyDownloadMatchesDraft ? "重新获取请假条" : windowInfo.accepting_participants ? "生成并下载请假条" : "恢复已提交材料" }}</button>
             <ActionMenu
               id="daily-public-document"
               aria-label="其他下载选项"
@@ -193,7 +335,7 @@ onMounted(load)
             />
           </div>
         </form>
-        <p v-if="downloaded" class="daily-public-muted">报名记录已保存；重复下载不会新建记录。凭证遗失无法仅凭姓名或学号找回，请联系活动管理员核验身份。</p>
+        <p v-if="hasPreparedDocument && readyDownloadMatchesDraft" class="daily-public-muted">报名记录已保存；重复获取不会新建记录。服务器已提供文件请求入口，但无法确认浏览器是否实际保存。</p>
       </template>
     </template>
     <template v-else>
@@ -211,6 +353,11 @@ onMounted(load)
 .daily-leave-public-form h1 { margin-top: 5px; overflow-wrap: anywhere; }
 .daily-public-muted, .daily-public-hint { color: var(--muted); font-size: 13px; line-height: 1.55; overflow-wrap: anywhere; }
 .daily-public-error { color: var(--danger); font-size: 12px; }
+.daily-public-recovery { margin: 16px 0; padding: 12px; border: 1px solid var(--line); border-radius: 8px; }
+.daily-public-recovery h2 { margin: 0 0 6px; font-size: 15px; }
+.daily-public-recovery ul { display: grid; gap: 10px; margin: 10px 0 0; padding: 0; list-style: none; }
+.daily-public-recovery li { display: grid; gap: 8px; min-width: 0; font-size: 13px; }
+.daily-public-recovery li span { overflow-wrap: anywhere; }
 .daily-public-facts { margin: 16px 0; }
 .daily-public-facts > div { display: grid; grid-template-columns: 78px minmax(0, 1fr); gap: 8px; padding: 5px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
 .daily-public-facts dt { color: var(--muted); }

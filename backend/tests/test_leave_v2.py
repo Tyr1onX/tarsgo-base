@@ -391,6 +391,17 @@ def main() -> None:
             external_doc = client.post(f"/api/daily-leave/public/{token}/document", json=external_payload)
             assert external_doc.status_code == 200, external_doc.text
             external_ready = external_doc.json()
+            # Model a POST that committed while its response was lost to a timed-out
+            # browser. Retrying from the saved tab capability must reuse the same row.
+            timeout_retry = client.post(f"/api/daily-leave/public/{token}/document", json=external_payload)
+            assert timeout_retry.status_code == 200, timeout_retry.text
+            assert timeout_retry.json()["download_url"] == external_ready["download_url"]
+            assert db.scalar(
+                select(func.count(DailyLeaveEntry.id)).where(
+                    DailyLeaveEntry.window_id == window_id,
+                    DailyLeaveEntry.student_id_snapshot == external_payload["student_id"],
+                )
+            ) == 1
             external_file = client.get(external_ready["download_url"])
             assert external_file.status_code == 200, external_file.text
             assert "attachment" in external_file.headers["content-disposition"].lower()
