@@ -5,6 +5,9 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+import secrets
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 import zipfile
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -15,7 +18,7 @@ from docx import Document
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, func, select, text
 
-from app.auth import get_current_member
+from app.auth import get_current_member, hash_token, utcnow
 from app.db import SessionLocal, get_db
 from app.leave_documents import build_camp_leave_college_docx
 from app.main import app
@@ -25,6 +28,7 @@ from app.models import (
     DailyLeaveEntry,
     DailyLeaveWindow,
     Member,
+    MemberIdentityAudit,
     SchoolLeaveRequest,
     SchoolLeaveRun,
 )
@@ -47,6 +51,10 @@ def docx_text(content: bytes) -> tuple[list[str], list[list[str]]]:
 def package_media(content: bytes) -> set[bytes]:
     with zipfile.ZipFile(io.BytesIO(content)) as archive:
         return {archive.read(name) for name in archive.namelist() if "/media/" in name or name.startswith("media/")}
+
+
+def download_credential() -> str:
+    return secrets.token_urlsafe(32)
 
 
 def main() -> None:
@@ -138,7 +146,15 @@ def main() -> None:
             set_actor(formal)
             standalone_doc = client.post("/api/daily-leave/self-service/document", json=standalone_payload)
             assert standalone_doc.status_code == 200, standalone_doc.text
-            standalone_paragraphs, standalone_tables = docx_text(standalone_doc.content)
+            standalone_ready = standalone_doc.json()
+            assert standalone_ready["download_url"].startswith("/api/daily-leave/self-service/document/")
+            assert standalone_payload["start_at"] not in standalone_ready["download_url"]
+            standalone_file = client.get(standalone_ready["download_url"])
+            assert standalone_file.status_code == 200, standalone_file.text
+            assert "attachment" in standalone_file.headers["content-disposition"].lower()
+            assert standalone_file.headers["cache-control"].startswith("private, no-store")
+            assert standalone_file.headers["x-content-type-options"] == "nosniff"
+            standalone_paragraphs, standalone_tables = docx_text(standalone_file.content)
             assert any(
                 "吉甲大师双创基地机器人战队创新实践活动" in line.replace("\u2060", "")
                 for line in standalone_paragraphs
@@ -163,7 +179,12 @@ def main() -> None:
                 "/api/daily-leave/self-service/document?offline=true", json=standalone_payload
             )
             assert standalone_offline.status_code == 200
-            assert package_media(standalone_offline.content) == set()
+            offline_ready = standalone_offline.json()
+            assert offline_ready["filename"].startswith("线下签章版_")
+            standalone_offline_file = client.get(offline_ready["download_url"])
+            assert standalone_offline_file.status_code == 200
+            assert package_media(standalone_offline_file.content) == set()
+            assert client.get(standalone_ready["download_url"]).content == standalone_file.content
             assert client.post(
                 "/api/daily-leave/self-service/document",
                 json={**standalone_payload, "title": "不允许客户端提交活动名"},
@@ -185,7 +206,53 @@ def main() -> None:
                 select(func.count(DailyLeaveEntry.id)).where(
                     DailyLeaveEntry.window_id.is_(None), DailyLeaveEntry.member_id == formal.id
                 )
-            ) == 2
+            ) == 1
+
+            # Requests in parallel must serialize even when neither request sees a prior row.
+            race_start = (now + timedelta(days=9)).replace(hour=8, minute=0)
+            race_payload = {
+                "start_at": race_start.isoformat(timespec="minutes"),
+                "end_at": race_start.replace(hour=17, minute=10).isoformat(timespec="minutes"),
+            }
+            set_actor(formal)
+            barrier = Barrier(2)
+
+            def independent_request_db():
+                with SessionLocal() as request_db:
+                    yield request_db
+
+            def concurrent_generation() -> int:
+                with TestClient(app) as concurrent_client:
+                    barrier.wait(timeout=10)
+                    response = concurrent_client.post(
+                        "/api/daily-leave/self-service/document", json=race_payload
+                    )
+                    return response.status_code
+
+            db.commit()
+            db.refresh(formal)
+            previous_db_override = app.dependency_overrides[get_db]
+            app.dependency_overrides[get_db] = independent_request_db
+            try:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    concurrent_statuses = list(executor.map(lambda _: concurrent_generation(), range(2)))
+            finally:
+                app.dependency_overrides[get_db] = previous_db_override
+            db.commit()
+            db.expire_all()
+            assert concurrent_statuses == [200, 200]
+            concurrent_entry_count = db.scalar(
+                select(func.count(DailyLeaveEntry.id)).where(
+                    DailyLeaveEntry.window_id.is_(None),
+                    DailyLeaveEntry.member_id == formal.id,
+                    DailyLeaveEntry.start_at == race_start,
+                    DailyLeaveEntry.end_at == race_start.replace(hour=17, minute=10),
+                )
+            )
+            assert concurrent_entry_count == 1, f"expected one parallel upsert row, found {concurrent_entry_count}"
+            set_actor(reserve)
+            assert client.get(standalone_ready["download_url"]).status_code == 404
+            set_actor(formal)
             set_actor(incomplete)
             assert client.post("/api/daily-leave/self-service/document", json=standalone_payload).status_code == 409
 
@@ -227,6 +294,9 @@ def main() -> None:
             assert member_windows.json()[0]["title"] == window_payload["title"]
             formal_doc = client.post(f"/api/daily-leave/windows/{window_id}/document")
             assert formal_doc.status_code == 200, formal_doc.text
+            formal_ready = formal_doc.json()
+            formal_file = client.get(formal_ready["download_url"])
+            assert formal_file.status_code == 200, formal_file.text
             first_entry = db.scalar(select(DailyLeaveEntry).where(DailyLeaveEntry.window_id == window_id))
             assert first_entry is not None
             assert first_entry.participant_type == "formal"
@@ -234,7 +304,13 @@ def main() -> None:
             assert first_entry.student_id_snapshot == "26000201"
             assert first_entry.college_snapshot == "electronic-science-engineering"
             assert first_entry.start_at is None and first_entry.end_at is None
-            assert client.post(f"/api/daily-leave/windows/{window_id}/document").status_code == 200
+            set_actor(admin)
+            assert client.get(formal_ready["download_url"]).status_code == 404
+            set_actor(formal)
+            formal_repeat = client.post(f"/api/daily-leave/windows/{window_id}/document")
+            assert formal_repeat.status_code == 200
+            formal_repeat_file = client.get(formal_repeat.json()["download_url"])
+            assert formal_repeat_file.status_code == 200
             assert db.scalar(select(func.count(DailyLeaveEntry.id)).where(DailyLeaveEntry.window_id == window_id)) == 1
 
             set_actor(reserve)
@@ -266,7 +342,7 @@ def main() -> None:
             assert client.post(f"/api/daily-leave/windows/{window_id}/document").status_code == 409
 
             # Default daily DOCX embeds exact source media and deterministic body/date/identity; offline omits both images.
-            signed_bytes = formal_doc.content
+            signed_bytes = formal_file.content
             signed_paragraphs, signed_tables = docx_text(signed_bytes)
             assert not any(window_payload["title"] in line for line in signed_paragraphs)
             time_text = (
@@ -290,8 +366,10 @@ def main() -> None:
             set_actor(formal)
             offline = client.post(f"/api/daily-leave/windows/{window_id}/document?offline=true")
             assert offline.status_code == 200, offline.text
-            assert package_media(offline.content) == set()
-            offline_paragraphs, offline_tables = docx_text(offline.content)
+            offline_file = client.get(offline.json()["download_url"])
+            assert offline_file.status_code == 200
+            assert package_media(offline_file.content) == set()
+            offline_paragraphs, offline_tables = docx_text(offline_file.content)
             assert [paragraph.replace("\u00a0", "") for paragraph in offline_paragraphs] == signed_paragraphs
             assert offline_tables == signed_tables
 
@@ -308,16 +386,52 @@ def main() -> None:
                 "name": "临时参与者",
                 "student_id": "26000203",
                 "college": "computer-science-technology",
+                "download_credential": download_credential(),
             }
             external_doc = client.post(f"/api/daily-leave/public/{token}/document", json=external_payload)
             assert external_doc.status_code == 200, external_doc.text
+            external_ready = external_doc.json()
+            # Model a POST that committed while its response was lost to a timed-out
+            # browser. Retrying from the saved tab capability must reuse the same row.
+            timeout_retry = client.post(f"/api/daily-leave/public/{token}/document", json=external_payload)
+            assert timeout_retry.status_code == 200, timeout_retry.text
+            assert timeout_retry.json()["download_url"] == external_ready["download_url"]
+            assert db.scalar(
+                select(func.count(DailyLeaveEntry.id)).where(
+                    DailyLeaveEntry.window_id == window_id,
+                    DailyLeaveEntry.student_id_snapshot == external_payload["student_id"],
+                )
+            ) == 1
+            external_file = client.get(external_ready["download_url"])
+            assert external_file.status_code == 200, external_file.text
+            assert "attachment" in external_file.headers["content-disposition"].lower()
+            assert external_file.headers["content-type"].startswith(
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            )
+            assert external_file.headers["cache-control"] == "private, no-store, no-cache, max-age=0"
+            assert external_file.headers["pragma"] == "no-cache"
+            assert external_file.headers["x-content-type-options"] == "nosniff"
+            assert external_file.headers["referrer-policy"] == "no-referrer"
+            assert token not in external_ready["download_url"]
+            assert external_payload["student_id"] not in external_ready["download_url"]
+            assert external_payload["name"] not in external_ready["download_url"]
+            assert "/public-download/" in external_ready["download_url"]
             external_repeat = client.post(
                 f"/api/daily-leave/public/{token}/document",
                 json={**external_payload, "name": "其他输入"},
             )
             assert external_repeat.status_code == 200
-            _, repeat_table = docx_text(external_repeat.content)
+            assert external_repeat.json()["download_url"] == external_ready["download_url"]
+            external_repeat_file = client.get(external_repeat.json()["download_url"])
+            assert external_repeat_file.status_code == 200
+            _, repeat_table = docx_text(external_repeat_file.content)
             assert repeat_table[0][1] == ["临时参与者", "26000203", "计算机科学与技术学院"]
+            assert db.scalar(
+                select(func.count(DailyLeaveEntry.id)).where(
+                    DailyLeaveEntry.window_id == window_id,
+                    DailyLeaveEntry.student_id_snapshot == external_payload["student_id"],
+                )
+            ) == 1
             public_entry = db.scalar(
                 select(DailyLeaveEntry).where(
                     DailyLeaveEntry.window_id == window_id,
@@ -325,7 +439,21 @@ def main() -> None:
                 )
             )
             assert public_entry is not None and public_entry.participant_type == "other"
-            public_paragraphs, public_tables = docx_text(external_doc.content)
+            assert public_entry.public_download_token_hash == hash_token(external_payload["download_credential"])
+            assert public_entry.public_download_expires_at is not None
+            assert public_entry.public_download_expires_at > utcnow()
+            wrong_credential = {**external_payload, "download_credential": download_credential()}
+            refused_claim = client.post(f"/api/daily-leave/public/{token}/document", json=wrong_credential)
+            assert refused_claim.status_code == 409, f"unexpected status {refused_claim.status_code}"
+            assert client.get(
+                f"/api/daily-leave/public/{token}/document/{public_entry.id}"
+            ).status_code == 404
+            # Student number alone and a different random credential cannot recover an existing snapshot.
+            assert client.post(
+                f"/api/daily-leave/public/{token}/document",
+                json={key: value for key, value in external_payload.items() if key != "download_credential"},
+            ).status_code == 422
+            public_paragraphs, public_tables = docx_text(external_file.content)
             assert public_tables[0][1] == ["临时参与者", "26000203", "计算机科学与技术学院"]
             assert "entries" not in "".join(public_paragraphs)
             assert client.post(
@@ -341,16 +469,54 @@ def main() -> None:
                 json={**external_payload, "start_at": window_payload["start_at"]},
             ).status_code == 422
 
-            # Re-downloading keeps the first member identity snapshot despite later Profile edits.
-            formal.name = "后来改名"
-            formal.student_id = "26000991"
-            formal.college = "art"
-            formal.team_membership = "reserve"
+            original_capability_expiry = public_entry.public_download_expires_at
+            public_entry.public_download_expires_at = utcnow() - timedelta(seconds=1)
             db.commit()
+            expired_capability = client.get(external_ready["download_url"])
+            assert expired_capability.status_code == 410
+            assert expired_capability.headers["cache-control"].startswith("private, no-store")
+            assert client.post(
+                f"/api/daily-leave/public/{token}/document", json=external_payload
+            ).status_code == 410
+            public_entry.public_download_expires_at = original_capability_expiry
+            db.commit()
+
+            # Admin identity corrections affect new matters but preserve existing snapshots.
+            set_actor(admin)
+            identity_update = client.patch(
+                f"/api/members/{formal.id}/profile",
+                json={
+                    "name": "后来改名",
+                    "student_id": "26000991",
+                    "college": "art",
+                    "team_membership": "reserve",
+                },
+            )
+            assert identity_update.status_code == 200, identity_update.text
+            assert identity_update.json()["identity_locked"] is True
             set_actor(formal)
+            old_self_file = client.get(standalone_ready["download_url"])
+            assert old_self_file.status_code == 200
+            _, old_self_tables = docx_text(old_self_file.content)
+            assert old_self_tables[0][1] == ["正式成员甲", "26000201", "电子科学与工程学院"]
+            new_start = (now + timedelta(days=11)).replace(hour=8, minute=0)
+            new_self = client.post(
+                "/api/daily-leave/self-service/document",
+                json={
+                    "start_at": new_start.isoformat(timespec="minutes"),
+                    "end_at": new_start.replace(hour=17, minute=10).isoformat(timespec="minutes"),
+                },
+            )
+            assert new_self.status_code == 200
+            new_self_file = client.get(new_self.json()["download_url"])
+            assert new_self_file.status_code == 200
+            _, new_self_tables = docx_text(new_self_file.content)
+            assert new_self_tables[0][1] == ["后来改名", "26000991", "艺术学院"]
             repeated_doc = client.post(f"/api/daily-leave/windows/{window_id}/document")
             assert repeated_doc.status_code == 200
-            repeated_paragraphs, repeated_tables = docx_text(repeated_doc.content)
+            repeated_file = client.get(repeated_doc.json()["download_url"])
+            assert repeated_file.status_code == 200
+            repeated_paragraphs, repeated_tables = docx_text(repeated_file.content)
             assert repeated_tables[0][1] == signed_tables[0][1]
             assert db.scalar(select(func.count(DailyLeaveEntry.id)).where(DailyLeaveEntry.window_id == window_id)) == 4
 
@@ -361,8 +527,19 @@ def main() -> None:
             set_actor(formal)
             assert client.post(f"/api/daily-leave/windows/{window_id}/document").status_code == 409
             set_actor(None)
-            assert client.post(f"/api/daily-leave/public/{token}/document", json=external_payload).status_code == 409
-            assert client.get(f"/api/daily-leave/public/{token}").status_code == 404
+            # The holder of a still-valid capability may recover/re-download after closure.
+            assert client.post(f"/api/daily-leave/public/{token}/document", json=external_payload).status_code == 200
+            closed_public_info = client.get(f"/api/daily-leave/public/{token}")
+            assert closed_public_info.status_code == 200
+            assert closed_public_info.json()["accepting_participants"] is False
+            assert client.get(external_ready["download_url"]).status_code == 200
+            assert client.post(
+                f"/api/daily-leave/public/{token}/document", json=external_payload
+            ).status_code == 200
+            assert client.post(
+                f"/api/daily-leave/public/{token}/document",
+                json={**external_payload, "student_id": "26000205"},
+            ).status_code == 409
             assert client.get("/api/daily-leave/public/not-a-valid-token").status_code == 404
 
             set_actor(admin)
@@ -385,10 +562,17 @@ def main() -> None:
             db.commit()
             expired_token = expired_row.public_token
             set_actor(None)
-            assert client.get(f"/api/daily-leave/public/{expired_token}").status_code == 404
+            expired_public_info = client.get(f"/api/daily-leave/public/{expired_token}")
+            assert expired_public_info.status_code == 200
+            assert expired_public_info.json()["accepting_participants"] is False
             assert client.post(
                 f"/api/daily-leave/public/{expired_token}/document",
-                json={"name": "截止后报名", "student_id": "26000204", "college": "art"},
+                json={
+                    "name": "截止后报名",
+                    "student_id": "26000205",
+                    "college": "art",
+                    "download_credential": download_credential(),
+                },
             ).status_code == 409
 
             # Camp docs use immutable college snapshots, with one separate list for each college.
@@ -407,17 +591,12 @@ def main() -> None:
             set_actor(reserve)
             assert client.post(f"/api/camp-leave/events/{camp_id}/join").status_code == 201
             set_actor(formal)
-            # Use the original formal snapshot from before Profile was edited by restoring only for camp signup.
-            formal.name = "正式成员甲"
-            formal.student_id = "26000201"
-            formal.college = "electronic-science-engineering"
-            formal.team_membership = "formal"
             db.commit()
             assert client.post(f"/api/camp-leave/events/{camp_id}/join").status_code == 201
             set_actor(admin)
             assert client.post(f"/api/camp-leave/admin/events/{camp_id}/close").status_code == 200
             signed_camp = client.get(
-                f"/api/camp-leave/admin/events/{camp_id}/colleges/electronic-science-engineering/document"
+                f"/api/camp-leave/admin/events/{camp_id}/colleges/art/document"
             )
             assert signed_camp.status_code == 200, signed_camp.text
             camp_paragraphs, camp_tables = docx_text(signed_camp.content)
@@ -427,7 +606,7 @@ def main() -> None:
             assert any("日常管理" in line and "全天候的实验室活动安排" in line for line in camp_paragraphs)
             assert camp_tables[0][0] == ["序号", "姓名", "学号", "学院"]
             assert len(camp_tables[0]) == 2
-            assert camp_tables[0][1][1:] == ["正式成员甲", "26000201", "电子科学与工程学院"]
+            assert camp_tables[0][1][1:] == ["后来改名", "26000991", "艺术学院"]
             assert {hashlib.sha256(value).hexdigest() for value in package_media(signed_camp.content)} >= {
                 hashlib.sha256(signature).hexdigest(), hashlib.sha256(seal).hexdigest()
             }
@@ -449,7 +628,7 @@ def main() -> None:
             assert any("寒假" in line for line in member_paragraphs)
             set_actor(admin)
             offline_camp = client.get(
-                f"/api/camp-leave/admin/events/{camp_id}/colleges/electronic-science-engineering/document?offline=true"
+                f"/api/camp-leave/admin/events/{camp_id}/colleges/art/document?offline=true"
             )
             assert offline_camp.status_code == 200
             assert package_media(offline_camp.content) == set()
@@ -491,6 +670,18 @@ def main() -> None:
                 run_id=legacy_run.id,
             )
             db.add(legacy_request)
+            legacy_duplicate = DailyLeaveEntry(
+                window_id=None,
+                member_id=formal.id,
+                start_at=standalone_entry.start_at,
+                end_at=standalone_entry.end_at,
+                name_snapshot=standalone_entry.name_snapshot,
+                student_id_snapshot=standalone_entry.student_id_snapshot,
+                college_snapshot=standalone_entry.college_snapshot,
+                participant_type=standalone_entry.participant_type,
+                submitted_at=standalone_entry.submitted_at + timedelta(minutes=1),
+            )
+            db.add(legacy_duplicate)
 
             # An interval ending exactly at the selected day's midnight does not overlap that day.
             boundary_start = datetime.combine(
@@ -553,12 +744,21 @@ def main() -> None:
                 if row["name"] == "正式成员甲" and row["record_type"] == "generated"
             ]
             assert any(row["source_type"] == "self_service" for row in generated_rows)
-            self_service_row = next(
-                row for row in generated_rows if row["id"] == f"generated:{standalone_entry.id}"
+            self_service_row = next(row for row in generated_rows if row["source_type"] == "self_service")
+            assert self_service_row["id"] == f"generated:{legacy_duplicate.id}"
+            assert self_service_row["generation_count"] == 2
+            assert len(self_service_row["generation_times"]) == 2
+            assert {row["source_type"] for row in generated_rows} == {"self_service", "shared_activity"}
+            expected_generation_times = [
+                value.replace(tzinfo=timezone.utc).astimezone(TZ).replace(tzinfo=None)
+                for value in (standalone_entry.submitted_at, legacy_duplicate.submitted_at)
+            ]
+            assert [datetime.fromisoformat(value) for value in self_service_row["generation_times"]] == sorted(
+                expected_generation_times
             )
             self_service_recorded_at = datetime.fromisoformat(self_service_row["recorded_at"])
             expected_self_service_time = (
-                standalone_entry.submitted_at.replace(tzinfo=timezone.utc)
+                legacy_duplicate.submitted_at.replace(tzinfo=timezone.utc)
                 .astimezone(TZ)
                 .replace(tzinfo=None)
             )
@@ -663,6 +863,11 @@ def main() -> None:
                     )
                 )
                 db.execute(delete(SchoolLeaveRun).where(SchoolLeaveRun.id.in_(legacy_run_ids)))
+            db.execute(
+                delete(MemberIdentityAudit).where(
+                    MemberIdentityAudit.member_id.in_([admin.id, formal.id, reserve.id, unassigned.id, incomplete.id])
+                )
+            )
             db.execute(delete(Member).where(Member.email.in_([admin_email, formal_email, reserve_email, unassigned_email, incomplete_email])))
             db.commit()
             if original_phone is None:

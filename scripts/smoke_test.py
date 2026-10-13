@@ -99,7 +99,7 @@ def invite(admin, name, email):
     )
 
 
-def activate(invitation):
+def activate(invitation, student_id):
     token = invitation["invite_path"].rsplit("/", 1)[1]
     info = call(opener(), f"/api/invitations/{token}")
     assert info["name"] == invitation["member"]["name"]
@@ -108,7 +108,12 @@ def activate(invitation):
         opener(),
         f"/api/invitations/{token}/accept",
         method="POST",
-        data={"password": password},
+        data={
+            "name": info["name"],
+            "student_id": student_id,
+            "college": "art",
+            "password": password,
+        },
         expected=204,
     )
     call(opener(), f"/api/invitations/{token}", expected=404)
@@ -152,14 +157,17 @@ def run_workflow():
 
     owner_invite = invite(admin, "李四", OWNER_EMAIL)
     owner_id = owner_invite["member"]["id"]
-    owner_password = activate(owner_invite)
+    owner_password = activate(owner_invite, "26000001")
 
     second_invite = invite(admin, "赵六", SECOND_MEMBER_EMAIL)
     second_id = second_invite["member"]["id"]
-    second_password = activate(second_invite)
+    second_password = activate(second_invite, "26000002")
 
     owner = login(OWNER_EMAIL, owner_password)
     second = login(SECOND_MEMBER_EMAIL, second_password)
+    owner_profile = call(owner, "/api/auth/me")
+    assert owner_profile["identity_locked"] is True
+    assert owner_profile["student_id"] == "26000001"
 
     call(owner, "/api/members", expected=403)
     call(owner, "/api/knowledge", expected=403)

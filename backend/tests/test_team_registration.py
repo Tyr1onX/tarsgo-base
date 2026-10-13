@@ -11,7 +11,7 @@ from app.auth import COOKIE_NAME, get_current_member, hash_token, utcnow, verify
 from app.college_dictionary import COLLEGES
 from app.db import SessionLocal, get_db
 from app.main import app
-from app.models import LoginSession, Member, TeamRegistrationWindow
+from app.models import Invitation, LoginSession, Member, MemberIdentityAudit, TeamRegistrationWindow
 from app.schemas import Role, TeamRegistrationIn
 
 
@@ -25,6 +25,7 @@ def main() -> None:
     first_email = f"registration-first-{token}@example.invalid"
     second_email = f"registration-second-{token}@example.invalid"
     third_email = f"registration-third-{token}@example.invalid"
+    invited_email = f"registration-invited-{token}@example.invalid"
     created_member_ids: set[int] = set()
     created_window_ids: set[int] = set()
 
@@ -211,8 +212,31 @@ def main() -> None:
                 assert me.json()["id"] == registered_id
                 assert me.json()["college"] == valid_college
                 assert me.json()["team_membership"] is None
+                assert me.json()["identity_locked"] is True
+
+                # Unlocked historical/incomplete accounts may finish identity once, then the API locks it.
+                set_actor(member)
+                first_identity = client.patch(
+                    "/api/auth/me",
+                    json={"name": "注册测试成员完成", "student_id": "26000801", "college": valid_college},
+                )
+                assert first_identity.status_code == 200, first_identity.text
+                assert first_identity.json()["identity_locked"] is True
+                assert client.patch(
+                    "/api/auth/me", json={"name": "试图自行改名", "student_id": "26000802"}
+                ).status_code == 409
+                assert client.patch(
+                    "/api/auth/me", json={"student_id": "26000803"}
+                ).json()["detail"] == "姓名和学号注册后不可自行修改。如需更正，请联系管理员。"
+                assert client.patch("/api/auth/me", json={"name": None}).status_code == 409
+                assert client.patch("/api/auth/me", json={"student_id": "invalid"}).status_code == 409
 
                 # Ordinary profile edits update school and group fields without identity.
+                set_actor(None)
+                with TestClient(app) as anonymous_client:
+                    assert anonymous_client.patch(
+                    "/api/auth/me", json={"student_id": "26000804"}
+                    ).status_code == 401
                 for group in GROUPS:
                     updated = client.patch(
                         "/api/auth/me",
@@ -228,8 +252,10 @@ def main() -> None:
                 )
                 assert updated_profile.status_code == 422, updated_profile.text
                 assert client.get("/api/auth/me").json()["team_membership"] is None
+                assert client.patch(
+                    "/api/auth/me", json={"student_id": "not-8-digits"}
+                ).status_code == 409
                 for invalid_profile in (
-                    {"student_id": "not-8-digits"},
                     {"college": "not-a-college"},
                     {"team_membership": "formal"},
                 ):
@@ -257,11 +283,12 @@ def main() -> None:
                 assert duplicate_student.status_code == 409
                 assert duplicate_student.json()["detail"] == "该学号已被使用。"
 
-                # Admin may edit another member's school/team profile; members may not.
+                # Admin identity corrections are unique, auditable, and hidden from ordinary members.
                 set_actor(admin)
                 admin_edit = client.patch(
-                    f"/api/members/{member.id}/profile",
+                    f"/api/members/{registered_id}/profile",
                     json={
+                        "name": "管理员更正姓名",
                         "student_id": f"{(int(base_payload['student_id']) + 2) % 100_000_000:08d}",
                         "team_group": "electrical",
                         "college": valid_college,
@@ -272,12 +299,79 @@ def main() -> None:
                 assert admin_edit.json()["team_group"] == "electrical"
                 assert admin_edit.json()["college"] == valid_college
                 assert admin_edit.json()["team_membership"] == "formal"
+                assert admin_edit.json()["name"] == "管理员更正姓名"
+                assert admin_edit.json()["identity_locked"] is True
+                duplicate_admin_edit = client.patch(
+                    f"/api/members/{registered_id}/profile",
+                    json={"student_id": "26000801"},
+                )
+                assert duplicate_admin_edit.status_code == 409
+                identity_audit = client.get(f"/api/members/{registered_id}/identity-audit")
+                assert identity_audit.status_code == 200
+                assert {(item["field"], item["old_value"], item["new_value"]) for item in identity_audit.json()} == {
+                    ("name", "Ada Q·赵", "管理员更正姓名"),
+                    ("student_id", base_payload["student_id"], admin_edit.json()["student_id"]),
+                }
+                assert all(item["admin_id"] == admin.id and item["changed_at"] for item in identity_audit.json())
 
                 set_actor(member)
+                assert client.get(f"/api/members/{registered_id}/identity-audit").status_code == 403
+                self_identity_edit = client.patch(
+                    "/api/auth/me", json={"name": "再次自助修改", "student_id": "26000805"}
+                )
+                assert self_identity_edit.status_code == 409
                 assert client.patch(
                     f"/api/members/{registered_id}/profile",
                     json={"team_group": "vision"},
                 ).status_code == 403
+
+                # Invited members may be prefilled by an administrator and still complete registration.
+                set_actor(admin)
+                invited_response = client.post(
+                    "/api/members/invite",
+                    json={"name": "邀请预填姓名", "email": invited_email},
+                )
+                assert invited_response.status_code == 201, invited_response.text
+                invited_id = invited_response.json()["member"]["id"]
+                created_member_ids.add(invited_id)
+                assert invited_response.json()["member"]["identity_locked"] is False
+                invitation_token = invited_response.json()["invite_path"].rsplit("/", 1)[1]
+                preset_id = f"{(int(base_payload['student_id']) + 20) % 100_000_000:08d}"
+                prefill = client.patch(
+                    f"/api/members/{invited_id}/profile",
+                    json={"name": "管理员预填姓名", "student_id": preset_id, "college": valid_college},
+                )
+                assert prefill.status_code == 200 and prefill.json()["identity_locked"] is False
+                invite_info = client.get(f"/api/invitations/{invitation_token}")
+                assert invite_info.status_code == 200
+                assert invite_info.json()["student_id"] == preset_id
+                assert invite_info.json()["college"] == valid_college
+                rejected_accept = client.post(
+                    f"/api/invitations/{invitation_token}/accept",
+                    json={
+                        "name": "新成员完成",
+                        "student_id": admin_edit.json()["student_id"],
+                        "college": valid_college,
+                        "password": "invited-password",
+                    },
+                )
+                assert rejected_accept.status_code == 409, f"unexpected status {rejected_accept.status_code}: {rejected_accept.text}"
+                accepted = client.post(
+                    f"/api/invitations/{invitation_token}/accept",
+                    json={
+                        "name": "邀请成员已注册",
+                        "student_id": preset_id,
+                        "college": valid_college,
+                        "password": "invited-password",
+                    },
+                )
+                assert accepted.status_code == 204, accepted.text
+                db.expire_all()
+                invited_member = db.get(Member, invited_id)
+                assert invited_member is not None
+                assert invited_member.status == "active" and invited_member.identity_locked is True
+                assert invited_member.name == "邀请成员已注册" and invited_member.student_id == preset_id
+                assert db.scalar(select(Invitation.id).where(Invitation.member_id == invited_id)) is None
 
                 # Closing invalidates the old raw token immediately; reopening creates a different token.
                 set_actor(admin)
@@ -334,6 +428,9 @@ def main() -> None:
                     )
                 )
             if created_member_ids:
+                db.execute(
+                    delete(MemberIdentityAudit).where(MemberIdentityAudit.member_id.in_(created_member_ids))
+                )
                 db.execute(delete(Member).where(Member.id.in_(created_member_ids)))
             db.commit()
 

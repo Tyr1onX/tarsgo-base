@@ -97,7 +97,29 @@ class Member(Base):
     password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
     role: Mapped[str] = mapped_column(String(20), default="member")
     status: Mapped[str] = mapped_column(String(20), default="invited")
+    identity_locked: Mapped[bool] = mapped_column(Boolean(), default=False, server_default=text("0"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(), server_default=func.now())
+
+
+class MemberIdentityAudit(Base):
+    __tablename__ = "member_identity_audits"
+    __table_args__ = (
+        CheckConstraint("field IN ('name','student_id')", name="ck_member_identity_audits_field"),
+        Index("ix_member_identity_audits_member_changed", "member_id", "changed_at", "id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    # Keep the affected member id even if an account is ever removed.
+    member_id: Mapped[int] = mapped_column(Integer(), nullable=False)
+    admin_id: Mapped[int | None] = mapped_column(
+        ForeignKey("members.id", ondelete="SET NULL"), nullable=True
+    )
+    field: Mapped[str] = mapped_column(String(20), nullable=False)
+    old_value: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    new_value: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    changed_at: Mapped[datetime] = mapped_column(DateTime(), server_default=func.now(), nullable=False)
+
+    admin: Mapped[Member | None] = relationship()
 
 
 class TeamRegistrationWindow(Base):
@@ -300,6 +322,8 @@ class DailyLeaveEntry(Base):
     college_snapshot: Mapped[str] = mapped_column(String(50), nullable=False)
     participant_type: Mapped[str] = mapped_column(String(20), nullable=False)
     submitted_at: Mapped[datetime] = mapped_column(DateTime(), server_default=func.now(), nullable=False)
+    public_download_token_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    public_download_expires_at: Mapped[datetime | None] = mapped_column(DateTime(), nullable=True)
 
     window: Mapped[DailyLeaveWindow | None] = relationship(back_populates="entries")
     member: Mapped[Member | None] = relationship()

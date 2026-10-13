@@ -14,7 +14,7 @@ from ..auth import (
 )
 from ..db import get_db
 from ..models import LoginSession, Member
-from ..schemas import LoginIn, MemberOut, MemberProfileUpdate
+from ..schemas import LoginIn, MemberOut, MemberProfileUpdate, validate_member_name, validate_student_id
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -58,12 +58,35 @@ def update_me(
     db: Session = Depends(get_db),
 ) -> Member:
     fields = payload.model_fields_set
+    protected_fields = fields & {"name", "student_id"}
+    if protected_fields and member.identity_locked:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="姓名和学号注册后不可自行修改。如需更正，请联系管理员。",
+        )
+    if "name" in fields:
+        try:
+            member.name = validate_member_name(payload.name or "")
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     if "student_id" in fields:
-        member.student_id = payload.student_id
+        try:
+            raw_student_id = payload.student_id.strip() if payload.student_id is not None else ""
+            member.student_id = validate_student_id(raw_student_id) if raw_student_id else None
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     if "team_group" in fields:
         member.team_group = payload.team_group
     if "college" in fields:
         member.college = payload.college
+    if protected_fields and not member.identity_locked:
+        try:
+            validate_member_name(member.name)
+            validate_student_id(member.student_id or "")
+        except ValueError:
+            pass
+        else:
+            member.identity_locked = True
     try:
         db.commit()
     except IntegrityError as exc:

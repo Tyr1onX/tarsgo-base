@@ -24,6 +24,7 @@ const downloadingSelf = ref(false)
 const downloadingId = ref<number | null>(null)
 const error = ref("")
 const notice = ref("")
+const readyDownload = ref<{ download_url: string; filename: string } | null>(null)
 const showCreateForm = ref(false)
 const closeRequest = ref<CloseRequest | null>(null)
 const closePending = ref(false)
@@ -44,6 +45,9 @@ const sharedWindows = computed(() => {
 })
 
 function messageOf(reason: unknown) {
+  if (reason instanceof TypeError) {
+    return "网络请求未能完成。请检查网络后重试；同一请假时段会复用已有事项，不会重复创建。"
+  }
   return reason instanceof Error ? reason.message : "操作失败"
 }
 
@@ -67,15 +71,14 @@ function range(item: Pick<DailyLeaveWindowMember, "start_at" | "end_at">) {
   return `${dateTime(item.start_at)} 至 ${dateTime(item.end_at)}`
 }
 
-function saveBlob(blob: Blob, filename: string) {
-  const url = URL.createObjectURL(blob)
+function requestNativeDownload(downloadUrl: string) {
   const anchor = document.createElement("a")
-  anchor.href = url
-  anchor.download = filename
+  anchor.href = downloadUrl
+  anchor.rel = "noopener"
+  anchor.referrerPolicy = "no-referrer"
   document.body.appendChild(anchor)
   anchor.click()
   anchor.remove()
-  URL.revokeObjectURL(url)
 }
 
 async function load() {
@@ -103,8 +106,10 @@ function validateRange(start: string, end: string) {
 }
 
 async function generateSelf(offline = false) {
+  if (downloadingSelf.value) return
   error.value = ""
   notice.value = ""
+  readyDownload.value = null
   if (!profileReady.value) {
     error.value = "请先完善姓名、8 位学号和学院后再生成。"
     return
@@ -120,8 +125,9 @@ async function generateSelf(offline = false) {
       start_at: selfDraft.value.start_at,
       end_at: selfDraft.value.end_at,
     }, offline)
-    saveBlob(file.blob, file.filename)
-    notice.value = offline ? "线下签章版已下载。" : "请假条已生成并下载。"
+    readyDownload.value = file
+    requestNativeDownload(file.download_url)
+    notice.value = "请假事项已保存，正在向浏览器发起文件请求。请检查下载列表或文件管理器确认保存；若未出现文件，使用下方链接重试，不会新增事项。"
   } catch (reason) {
     error.value = messageOf(reason)
   } finally {
@@ -130,17 +136,20 @@ async function generateSelf(offline = false) {
 }
 
 async function generateShared(item: DailyLeaveWindowMember, offline = false) {
+  if (downloadingId.value !== null) return
   error.value = ""
   notice.value = ""
+  readyDownload.value = null
   if (!profileReady.value) {
     error.value = "请先完善姓名、8 位学号和学院后再生成。"
     return
   }
   downloadingId.value = item.id
   try {
-    const file = await api.downloadDailyLeaveDocument(item.id, offline)
-    saveBlob(file.blob, file.filename)
-    notice.value = offline ? "线下签章版已下载。" : "请假条已生成并下载。"
+    const file = await api.prepareDailyLeaveWindowDocument(item.id, offline)
+    readyDownload.value = file
+    requestNativeDownload(file.download_url)
+    notice.value = "共享报名已保存，正在向浏览器发起文件请求。请检查下载列表或文件管理器确认保存；若未出现文件，使用下方链接重试。"
   } catch (reason) {
     error.value = messageOf(reason)
   } finally {
@@ -279,6 +288,9 @@ onMounted(() => {
   <div class="daily-leave-page">
     <p v-if="error" class="daily-leave-feedback daily-leave-error" role="alert">{{ error }}</p>
     <p v-if="notice" class="daily-leave-feedback daily-leave-notice" role="status">{{ notice }}</p>
+    <p v-if="readyDownload" class="daily-leave-feedback daily-leave-notice">
+      <a :href="readyDownload.download_url" referrerpolicy="no-referrer">若未看到文件，请点此重新下载。</a>
+    </p>
 
     <section class="daily-leave-section daily-leave-self">
       <div class="daily-leave-heading"><h2>生成请假条</h2></div>
@@ -297,7 +309,7 @@ onMounted(() => {
         </label>
         <div class="daily-leave-self-actions">
           <button class="primary" type="submit" :disabled="downloadingSelf || !profileReady">
-            {{ downloadingSelf ? "正在生成…" : "生成并下载请假条" }}
+            {{ downloadingSelf ? "正在准备文件…" : "生成并下载请假条" }}
           </button>
           <ActionMenu
             id="daily-self-service-document"
@@ -329,14 +341,14 @@ onMounted(() => {
             </div>
           </div>
           <div class="daily-leave-actions">
-            <button class="text-action" type="button" :disabled="!profileReady || downloadingId === item.id" @click="generateShared(item)">
-              {{ downloadingId === item.id ? "正在生成…" : "一键生成" }}
+            <button class="text-action" type="button" :disabled="!profileReady || downloadingId !== null" @click="generateShared(item)">
+              {{ downloadingId === item.id ? "正在准备文件…" : "一键生成" }}
             </button>
             <ActionMenu
               v-if="isAdmin"
               :id="`daily-shared-admin-${item.id}`"
               aria-label="共享活动操作"
-              :disabled="downloadingId === item.id"
+              :disabled="downloadingId !== null"
               :actions="[...adminMenuActions(item), { key: 'offline', label: '下载线下签章版' }]"
               @select="handleAdminMenuSelect(item, $event)"
             />
@@ -344,7 +356,7 @@ onMounted(() => {
               v-else
               :id="`daily-shared-${item.id}`"
               aria-label="其他下载选项"
-              :disabled="downloadingId === item.id || !profileReady"
+              :disabled="downloadingId !== null || !profileReady"
               :actions="memberMenuActions(item)"
               @select="handleMemberMenu(item, $event)"
             />

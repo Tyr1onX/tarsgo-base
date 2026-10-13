@@ -352,8 +352,6 @@ def admin_list_leave_records(
 
     if record_type in (None, "generated"):
         generated_filters = []
-        if search_pattern is not None:
-            generated_filters.append(DailyLeaveEntry.name_snapshot.ilike(search_pattern, escape="\\"))
         if lower_bound is not None:
             generated_filters.append(
                 or_(
@@ -373,12 +371,39 @@ def admin_list_leave_records(
             .outerjoin(DailyLeaveWindow, DailyLeaveWindow.id == DailyLeaveEntry.window_id)
             .where(*generated_filters)
         ).all()
+        generated_groups: dict[tuple[object, ...], list[tuple[DailyLeaveEntry, DailyLeaveWindow | None]]] = {}
         for entry, window in generated_rows:
             start_at = window.start_at if window is not None else entry.start_at
             end_at = window.end_at if window is not None else entry.end_at
             if start_at is None or end_at is None:
                 continue
             is_shared = window is not None
+            source_type = "shared_activity" if is_shared else "self_service"
+            identity = entry.member_id if entry.member_id is not None else entry.student_id_snapshot
+            group_key = (
+                source_type,
+                identity,
+                start_at,
+                end_at,
+                window.id if window is not None else None,
+            )
+            generated_groups.setdefault(group_key, []).append((entry, window))
+
+        for group in generated_groups.values():
+            group.sort(key=lambda row: (row[0].submitted_at, row[0].id))
+            if search_name and not any(
+                search_name.casefold() in item.name_snapshot.casefold()
+                for item, _ in group
+            ):
+                continue
+            entry, window = group[-1]
+            start_at = window.start_at if window is not None else entry.start_at
+            end_at = window.end_at if window is not None else entry.end_at
+            assert start_at is not None and end_at is not None
+            generation_times = [
+                _database_timestamp_in_beijing(item.submitted_at)
+                for item, _ in group
+            ]
             records.append(
                 AdminLeaveRecordOut(
                     id=f"generated:{entry.id}",
@@ -386,10 +411,12 @@ def admin_list_leave_records(
                     student_id=entry.student_id_snapshot,
                     start_at=start_at,
                     end_at=end_at,
-                    recorded_at=_database_timestamp_in_beijing(entry.submitted_at),
+                    recorded_at=generation_times[-1],
                     record_type="generated",
-                    source_type="shared_activity" if is_shared else "self_service",
+                    source_type="shared_activity" if window is not None else "self_service",
                     activity_title=window.title if window is not None else None,
+                    generation_count=len(group),
+                    generation_times=generation_times,
                 )
             )
 

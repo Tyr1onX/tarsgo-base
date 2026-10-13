@@ -12,12 +12,15 @@ import type {
   DailyLeaveWindowCreatePayload,
   DailyLeaveWindowMember,
   DailyLeaveSelfServicePayload,
+  DailyLeaveDocumentReady,
   AIItemReviewResult,
   AIItemReviewSuggestion,
   AIItemFactExtractionResult,
   CollegeOption,
   InvitationInfo,
   InviteResult,
+  InvitationAcceptPayload,
+  MemberIdentityAudit,
   ItemActivity,
   ItemActivityPage,
   ItemFactInput,
@@ -109,6 +112,40 @@ async function downloadFile(url: string, fallbackName: string, init?: RequestIni
   }
 }
 
+async function requestDailyLeaveDocument(url: string, init: RequestInit): Promise<DailyLeaveDocumentReady> {
+  const controller = typeof AbortController === "undefined" ? null : new AbortController()
+  let timeoutExpired = false
+  let timeoutId: ReturnType<typeof globalThis.setTimeout> | undefined
+  const timeoutMessage = "请求等待超过 45 秒。请检查网络后重试；同一请假时段会复用已有事项，不会重复创建。"
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = globalThis.setTimeout(() => {
+      timeoutExpired = true
+      controller?.abort()
+      reject(new ApiError(408, timeoutMessage))
+    }, 45_000)
+  })
+  const request = (async () => {
+    const response = await fetch(url, { ...init, ...(controller ? { signal: controller.signal } : {}) })
+    if (!response.ok) {
+      let message = "请假材料生成失败"
+      try {
+        const data = (await response.json()) as { detail?: string }
+        if (data.detail) message = data.detail
+      } catch {}
+      throw new ApiError(response.status, message)
+    }
+    return (await response.json()) as DailyLeaveDocumentReady
+  })()
+  try {
+    return await Promise.race([request, timeout])
+  } catch (reason) {
+    if (timeoutExpired) throw new ApiError(408, timeoutMessage)
+    throw reason
+  } finally {
+    if (timeoutId !== undefined) globalThis.clearTimeout(timeoutId)
+  }
+}
+
 export interface TaskPayload {
   kind?: TaskKind
   title: string
@@ -139,10 +176,10 @@ export const api = {
   logout: () => request<void>("/api/auth/logout", { method: "POST" }),
 
   invitation: (token: string) => request<InvitationInfo>(`/api/invitations/${encodeURIComponent(token)}`),
-  acceptInvitation: (token: string, password: string) =>
+  acceptInvitation: (token: string, payload: InvitationAcceptPayload) =>
     request<void>(`/api/invitations/${encodeURIComponent(token)}/accept`, {
       method: "POST",
-      body: JSON.stringify({ password }),
+      body: JSON.stringify(payload),
     }),
 
   members: () => request<Member[]>("/api/members"),
@@ -159,6 +196,8 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(payload),
     }),
+  memberIdentityAudit: (memberId: number) =>
+    request<MemberIdentityAudit[]>(`/api/members/${memberId}/identity-audit`),
 
   currentTeamRegistration: () =>
     request<TeamRegistrationWindow | null>("/api/team-registration/admin/current"),
@@ -251,22 +290,20 @@ export const api = {
   closeDailyLeaveWindow: (windowId: number) =>
     request<DailyLeaveWindowAdmin>(`/api/daily-leave/admin/windows/${windowId}/close`, { method: "POST" }),
   generateDailyLeaveSelfServiceDocument: (payload: DailyLeaveSelfServicePayload, offline = false) =>
-    downloadFile(
+    requestDailyLeaveDocument(
       `/api/daily-leave/self-service/document${offline ? "?offline=true" : ""}`,
-      "请假条.docx",
       { method: "POST", body: JSON.stringify(payload), headers: { "Content-Type": "application/json" } },
     ),
-  downloadDailyLeaveDocument: (windowId: number, offline = false) =>
-    downloadFile(
+  prepareDailyLeaveWindowDocument: (windowId: number, offline = false) =>
+    requestDailyLeaveDocument(
       `/api/daily-leave/windows/${windowId}/document${offline ? "?offline=true" : ""}`,
-      "请假条.docx",
+      { method: "POST" },
     ),
   publicDailyLeaveWindow: (token: string) =>
     request<DailyLeavePublicWindow>(`/api/daily-leave/public/${encodeURIComponent(token)}`),
   generatePublicDailyLeaveDocument: (token: string, payload: DailyLeavePublicEntry, offline = false) =>
-    downloadFile(
+    requestDailyLeaveDocument(
       `/api/daily-leave/public/${encodeURIComponent(token)}/document${offline ? "?offline=true" : ""}`,
-      "请假条.docx",
       { method: "POST", body: JSON.stringify(payload), headers: { "Content-Type": "application/json" } },
     ),
 

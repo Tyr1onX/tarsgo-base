@@ -7,8 +7,16 @@ from sqlalchemy.orm import Session
 
 from ..auth import hash_token, new_token, require_admin, utcnow
 from ..db import get_db
-from ..models import Invitation, LoginSession, Member
-from ..schemas import AdminMemberProfileUpdate, InviteCreate, InviteOut, MemberOut
+from ..models import Invitation, LoginSession, Member, MemberIdentityAudit
+from ..schemas import (
+    AdminMemberProfileUpdate,
+    InviteCreate,
+    InviteOut,
+    MemberIdentityAuditOut,
+    MemberOut,
+    validate_member_name,
+    validate_student_id,
+)
 
 router = APIRouter(prefix="/api/members", tags=["members"])
 INVITATION_TTL = timedelta(days=7)
@@ -69,14 +77,38 @@ def regenerate_invitation(
 def update_member_profile(
     member_id: int,
     payload: AdminMemberProfileUpdate,
-    _: Member = Depends(require_admin),
+    current: Member = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> Member:
     member = db.get(Member, member_id)
     if not member:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="成员不存在")
     fields = payload.model_fields_set
+    identity_changes: list[MemberIdentityAudit] = []
+    if "name" in fields and member.name != payload.name:
+        identity_changes.append(
+            MemberIdentityAudit(
+                member_id=member.id,
+                admin_id=current.id,
+                field="name",
+                old_value=member.name,
+                new_value=payload.name,
+                changed_at=utcnow(),
+            )
+        )
+        member.name = payload.name or ""
     if "student_id" in fields:
+        if member.student_id != payload.student_id:
+            identity_changes.append(
+                MemberIdentityAudit(
+                    member_id=member.id,
+                    admin_id=current.id,
+                    field="student_id",
+                    old_value=member.student_id,
+                    new_value=payload.student_id,
+                    changed_at=utcnow(),
+                )
+            )
         member.student_id = payload.student_id
     if "team_group" in fields:
         member.team_group = payload.team_group
@@ -84,6 +116,15 @@ def update_member_profile(
         member.college = payload.college
     if "team_membership" in fields:
         member.team_membership = payload.team_membership
+    if member.status == "active":
+        try:
+            validate_member_name(member.name)
+            validate_student_id(member.student_id or "")
+        except ValueError:
+            pass
+        else:
+            member.identity_locked = True
+    db.add_all(identity_changes)
     try:
         db.commit()
     except IntegrityError as exc:
@@ -91,6 +132,23 @@ def update_member_profile(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="该学号已被使用") from exc
     db.refresh(member)
     return member
+
+
+@router.get("/{member_id}/identity-audit", response_model=list[MemberIdentityAuditOut])
+def list_member_identity_audit(
+    member_id: int,
+    _: Member = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> list[MemberIdentityAudit]:
+    if db.get(Member, member_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="成员不存在")
+    return list(
+        db.scalars(
+            select(MemberIdentityAudit)
+            .where(MemberIdentityAudit.member_id == member_id)
+            .order_by(MemberIdentityAudit.changed_at.desc(), MemberIdentityAudit.id.desc())
+        )
+    )
 
 
 @router.post("/{member_id}/disable", response_model=MemberOut)

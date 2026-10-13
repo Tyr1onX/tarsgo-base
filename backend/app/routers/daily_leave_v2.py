@@ -1,16 +1,14 @@
 from __future__ import annotations
 
-import io
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from ..auth import get_current_member, new_token, require_admin
+from ..auth import get_current_member, hash_token, new_token, require_admin, utcnow
 from ..college_dictionary import COLLEGE_BY_CODE
 from ..db import get_db
 from ..leave_documents import DOCX_MIME_TYPE, build_daily_leave_v2_docx
@@ -22,6 +20,7 @@ from ..schemas import (
     DailyLeaveWindowCreate,
     DailyLeaveWindowMemberOut,
     DailyLeaveSelfServiceCreate,
+    DailyLeaveDocumentReadyOut,
     validate_college,
     validate_member_name,
     validate_student_id,
@@ -30,6 +29,14 @@ from ..school_leave import get_leave_contact_phone, school_leave_now
 
 
 router = APIRouter(prefix="/api/daily-leave", tags=["daily-leave-v2"])
+PUBLIC_DOWNLOAD_TTL = timedelta(days=7)
+PRIVATE_DOCUMENT_HEADERS = {
+    "Cache-Control": "private, no-store, no-cache, max-age=0",
+    "Pragma": "no-cache",
+    "Expires": "0",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+}
 
 
 def _accepting(window: DailyLeaveWindow, *, now: datetime | None = None) -> bool:
@@ -108,12 +115,20 @@ def _public_window(token: str, db: Session, *, lock: bool = False) -> DailyLeave
     return window
 
 
-def _document_response(content: bytes, filename: str) -> StreamingResponse:
-    return StreamingResponse(
-        io.BytesIO(content),
-        media_type=DOCX_MIME_TYPE,
-        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
-    )
+def _document_response(content: bytes, filename: str) -> Response:
+    date_part = filename.removesuffix(".docx").replace("请假条_", "leave-").replace("线下签章版_", "offline-leave-")
+    fallback_filename = f"{date_part}.docx"
+    headers = {
+        **PRIVATE_DOCUMENT_HEADERS,
+        "Content-Disposition": (
+            f'attachment; filename="{fallback_filename}"; filename*=UTF-8\'\'{quote(filename)}'
+        ),
+    }
+    return Response(content=content, media_type=DOCX_MIME_TYPE, headers=headers)
+
+
+def _document_ready(download_url: str, filename: str) -> DailyLeaveDocumentReadyOut:
+    return DailyLeaveDocumentReadyOut(download_url=download_url, filename=filename)
 
 
 def _make_document(
@@ -242,13 +257,13 @@ def close_window(
     return _admin_window_out(db, window)
 
 
-@router.post("/windows/{window_id}/document")
+@router.post("/windows/{window_id}/document", response_model=DailyLeaveDocumentReadyOut)
 def member_document(
     window_id: int,
     offline: bool = False,
     current: Member = Depends(get_current_member),
     db: Session = Depends(get_db),
-) -> StreamingResponse:
+) -> DailyLeaveDocumentReadyOut:
     window = _get_window(db, window_id, lock=True)
     _require_open(window, public=False)
     entry = db.scalar(
@@ -284,6 +299,29 @@ def member_document(
             db.rollback()
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="该学号已在本窗口生成材料") from exc
 
+    filename = _daily_filename(window.start_at, offline=offline)
+    download_url = f"/api/daily-leave/windows/{window.id}/document"
+    if offline:
+        download_url += "?offline=true"
+    return _document_ready(download_url, filename)
+
+
+@router.get("/windows/{window_id}/document")
+def member_document_download(
+    window_id: int,
+    offline: bool = False,
+    current: Member = Depends(get_current_member),
+    db: Session = Depends(get_db),
+) -> Response:
+    window = _get_window(db, window_id)
+    entry = db.scalar(
+        select(DailyLeaveEntry).where(
+            DailyLeaveEntry.window_id == window.id,
+            DailyLeaveEntry.member_id == current.id,
+        )
+    )
+    if entry is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="请先生成该共享活动的请假材料")
     content = _make_document(
         start_at=window.start_at,
         end_at=window.end_at,
@@ -295,58 +333,95 @@ def member_document(
     return _document_response(content, _daily_filename(window.start_at, offline=offline))
 
 
-@router.post("/self-service/document")
+@router.post("/self-service/document", response_model=DailyLeaveDocumentReadyOut)
 def self_service_document(
     payload: DailyLeaveSelfServiceCreate,
     offline: bool = False,
     current: Member = Depends(get_current_member),
     db: Session = Depends(get_db),
-) -> StreamingResponse:
-    name, student_id, college = _member_identity(current)
+) -> DailyLeaveDocumentReadyOut:
+    # Serialize self-service upserts on the member row. This makes the following
+    # current read safe under MySQL REPEATABLE READ without a schema migration.
+    db.scalar(select(Member.id).where(Member.id == current.id).with_for_update())
+    entry = db.scalar(
+        select(DailyLeaveEntry)
+        .where(
+            DailyLeaveEntry.window_id.is_(None),
+            DailyLeaveEntry.member_id == current.id,
+            DailyLeaveEntry.start_at == payload.start_at,
+            DailyLeaveEntry.end_at == payload.end_at,
+        )
+        .with_for_update()
+    )
+    if entry is None:
+        name, student_id, college = _member_identity(current)
+        entry = DailyLeaveEntry(
+            window_id=None,
+            member_id=current.id,
+            start_at=payload.start_at,
+            end_at=payload.end_at,
+            name_snapshot=name,
+            student_id_snapshot=student_id,
+            college_snapshot=college,
+            participant_type=current.team_membership or "other",
+        )
+        db.add(entry)
+        db.flush()
+    db.commit()
+    filename = _daily_filename(payload.start_at, offline=offline)
+    download_url = f"/api/daily-leave/self-service/document/{entry.id}"
+    if offline:
+        download_url += "?offline=true"
+    return _document_ready(download_url, filename)
+
+
+@router.get("/self-service/document/{entry_id}")
+def self_service_document_download(
+    entry_id: int,
+    offline: bool = False,
+    current: Member = Depends(get_current_member),
+    db: Session = Depends(get_db),
+) -> Response:
+    entry = db.scalar(
+        select(DailyLeaveEntry).where(
+            DailyLeaveEntry.id == entry_id,
+            DailyLeaveEntry.window_id.is_(None),
+            DailyLeaveEntry.member_id == current.id,
+        )
+    )
+    if entry is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="请先生成该时段的请假材料")
+    if entry.start_at is None or entry.end_at is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="该记录没有有效的请假时段")
     content = _make_document(
-        start_at=payload.start_at,
-        end_at=payload.end_at,
-        name=name,
-        student_id=student_id,
-        college=college,
+        start_at=entry.start_at,
+        end_at=entry.end_at,
+        name=entry.name_snapshot,
+        student_id=entry.student_id_snapshot,
+        college=entry.college_snapshot,
         offline=offline,
     )
-    entry = DailyLeaveEntry(
-        window_id=None,
-        member_id=current.id,
-        start_at=payload.start_at,
-        end_at=payload.end_at,
-        name_snapshot=name,
-        student_id_snapshot=student_id,
-        college_snapshot=college,
-        participant_type=current.team_membership or "other",
-    )
-    db.add(entry)
-    db.commit()
-    return _document_response(content, _daily_filename(payload.start_at, offline=offline))
+    return _document_response(content, _daily_filename(entry.start_at, offline=offline))
 
 
 @router.get("/public/{token}", response_model=DailyLeavePublicWindowOut)
 def public_window(token: str, db: Session = Depends(get_db)) -> DailyLeavePublicWindowOut:
     window = _public_window(token, db)
-    if not _accepting(window):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="临时链接已失效")
     return DailyLeavePublicWindowOut(
         start_at=window.start_at,
         end_at=window.end_at,
-        accepting_participants=True,
+        accepting_participants=_accepting(window),
     )
 
 
-@router.post("/public/{token}/document")
+@router.post("/public/{token}/document", response_model=DailyLeaveDocumentReadyOut)
 def public_document(
     token: str,
     payload: DailyLeavePublicEntryCreate,
     offline: bool = False,
     db: Session = Depends(get_db),
-) -> StreamingResponse:
+) -> DailyLeaveDocumentReadyOut:
     window = _public_window(token, db, lock=True)
-    _require_open(window, public=True)
     entry = db.scalar(
         select(DailyLeaveEntry)
         .where(
@@ -355,29 +430,81 @@ def public_document(
         )
         .with_for_update()
     )
-    if entry is None:
-        entry = DailyLeaveEntry(
-            window_id=window.id,
-            member_id=None,
-            name_snapshot=payload.name,
-            student_id_snapshot=payload.student_id,
-            college_snapshot=payload.college,
-            participant_type="other",
-        )
-        db.add(entry)
-        try:
-            db.commit()
-        except IntegrityError as exc:
-            db.rollback()
-            # A concurrent repeat still resolves to the original snapshot.
-            entry = db.scalar(
-                select(DailyLeaveEntry).where(
-                    DailyLeaveEntry.window_id == window.id,
-                    DailyLeaveEntry.student_id_snapshot == payload.student_id,
+    credential_hash = hash_token(payload.download_credential)
+    filename = _daily_filename(window.start_at, offline=offline)
+    if entry is not None:
+        if entry.public_download_token_hash == credential_hash:
+            if entry.public_download_expires_at is None or entry.public_download_expires_at <= utcnow():
+                raise HTTPException(
+                    status_code=status.HTTP_410_GONE,
+                    detail="下载凭证已过期；请联系活动管理员核验身份。",
                 )
-            )
-            if entry is None:
-                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="请稍后重新生成") from exc
+            download_url = f"/api/daily-leave/public-download/{payload.download_credential}"
+            if offline:
+                download_url += "?offline=true"
+            return _document_ready(download_url, filename)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="无法通过姓名或学号重新领取材料。请使用首次下载链接；如凭证遗失，请联系活动管理员核验身份。",
+        )
+    _require_open(window, public=True)
+    entry = DailyLeaveEntry(
+        window_id=window.id,
+        member_id=None,
+        name_snapshot=payload.name,
+        student_id_snapshot=payload.student_id,
+        college_snapshot=payload.college,
+        participant_type="other",
+        public_download_token_hash=credential_hash,
+        public_download_expires_at=utcnow() + PUBLIC_DOWNLOAD_TTL,
+    )
+    db.add(entry)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="无法通过姓名或学号重新领取材料。请使用首次下载链接；如凭证遗失，请联系活动管理员核验身份。",
+        ) from exc
+
+    download_url = f"/api/daily-leave/public-download/{payload.download_credential}"
+    if offline:
+        download_url += "?offline=true"
+    return _document_ready(download_url, filename)
+
+
+@router.get("/public-download/{credential}")
+def public_document_download(
+    credential: str,
+    offline: bool = False,
+    db: Session = Depends(get_db),
+) -> Response:
+    def missing_credential() -> HTTPException:
+        return HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="下载凭证无效或已失效；如凭证遗失，请联系活动管理员核验身份。",
+            headers=PRIVATE_DOCUMENT_HEADERS,
+        )
+
+    if not 40 <= len(credential) <= 50 or any(
+        char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for char in credential
+    ):
+        raise missing_credential()
+    entry = db.scalar(
+        select(DailyLeaveEntry).where(DailyLeaveEntry.public_download_token_hash == hash_token(credential))
+    )
+    if entry is None or entry.window_id is None or entry.public_download_expires_at is None:
+        raise missing_credential()
+    if entry.public_download_expires_at <= utcnow():
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="下载凭证已过期；请联系活动管理员核验身份。",
+            headers=PRIVATE_DOCUMENT_HEADERS,
+        )
+    window = db.get(DailyLeaveWindow, entry.window_id)
+    if window is None:
+        raise missing_credential()
     content = _make_document(
         start_at=window.start_at,
         end_at=window.end_at,

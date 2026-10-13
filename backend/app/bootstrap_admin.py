@@ -30,6 +30,7 @@ def main() -> None:
             password_hash=hash_password(password),
             role="admin",
             status="active",
+            identity_locked=True,
         )
         db.add(member)
         db.commit()

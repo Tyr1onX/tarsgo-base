@@ -120,6 +120,7 @@ const appConfirmPending = ref(false)
 
 const loginEmail = ref("")
 const loginPassword = ref("")
+const nameDraft = ref("")
 const studentIdDraft = ref("")
 const teamGroupDraft = ref<TeamGroup | "">("")
 const collegeDraft = ref("")
@@ -129,6 +130,9 @@ const memberProfileFieldErrors = ref<Record<number, Record<string, string>>>({})
 const profileSaving = ref(false)
 
 const invitation = ref<InvitationInfo | null>(null)
+const inviteName = ref("")
+const inviteStudentId = ref("")
+const inviteCollege = ref("")
 const invitePassword = ref("")
 const invitePasswordConfirm = ref("")
 
@@ -325,7 +329,8 @@ const teamMemberDetail = computed(() =>
 const isTeamRoute = computed(() => path.value === "/team" || teamMemberDetailId.value !== null)
 const isMeRoute = computed(() => path.value === "/me" || path.value === "/me/edit")
 const myProfileChanged = computed(() =>
-  studentIdDraft.value.trim() !== (user.value?.student_id ?? "") ||
+  (!user.value?.identity_locked && nameDraft.value.trim() !== (user.value?.name ?? "")) ||
+  (!user.value?.identity_locked && studentIdDraft.value.trim() !== (user.value?.student_id ?? "")) ||
   teamGroupDraft.value !== (user.value?.team_group ?? "") ||
   collegeDraft.value !== (user.value?.college ?? ""),
 )
@@ -1129,6 +1134,10 @@ async function loadRoute() {
       }
     } else if (routePath.startsWith("/invite/")) {
       invitation.value = await api.invitation(inviteToken.value)
+      inviteName.value = invitation.value.name
+      inviteStudentId.value = invitation.value.student_id ?? ""
+      inviteCollege.value = invitation.value.college ?? ""
+      await ensureCollegeOptions()
       if (!isCurrentLoad()) return
     } else if (routePath.startsWith("/register/")) {
       registrationInfo.value = null
@@ -1274,6 +1283,7 @@ async function loadRoute() {
     } else if (routePath === "/me/edit") {
       await ensureCollegeOptions()
       if (!isCurrentLoad()) return
+      nameDraft.value = user.value?.name ?? ""
       studentIdDraft.value = user.value?.student_id ?? ""
       teamGroupDraft.value = user.value?.team_group ?? ""
       collegeDraft.value = user.value?.college ?? ""
@@ -1329,14 +1339,36 @@ async function submitLogin() {
 
 async function submitInvitation() {
   error.value = ""
+  const name = inviteName.value.trim()
+  const studentId = inviteStudentId.value.trim()
+  if (name.length < 2 || name.length > 50) {
+    error.value = "姓名长度需为 2–50 个字符"
+    return
+  }
+  if (!/^[0-9]{8}$/.test(studentId)) {
+    error.value = "学号必须是 8 位数字"
+    return
+  }
+  if (!collegeOptions.value.some((college) => college.code === inviteCollege.value)) {
+    error.value = "请选择有效学院"
+    return
+  }
   if (invitePassword.value !== invitePasswordConfirm.value) {
     error.value = "两次输入的密码不一致"
     return
   }
 
   try {
-    await api.acceptInvitation(inviteToken.value, invitePassword.value)
+    await api.acceptInvitation(inviteToken.value, {
+      name,
+      student_id: studentId,
+      college: inviteCollege.value,
+      password: invitePassword.value,
+    })
     invitation.value = null
+    inviteName.value = ""
+    inviteStudentId.value = ""
+    inviteCollege.value = ""
     invitePassword.value = ""
     invitePasswordConfirm.value = ""
     notice.value = "密码已设置，请登录"
@@ -1538,8 +1570,12 @@ function clearMemberProfileFieldError(memberId: number, field: string) {
 }
 
 function profileValidationError(): [string, string] | null {
+  const name = nameDraft.value.trim()
   const studentId = studentIdDraft.value.trim()
-  if (studentId && !/^\d{8}$/.test(studentId)) return ["student_id", "学号必须是 8 位数字"]
+  if (!user.value?.identity_locked && (Array.from(name).length < 2 || Array.from(name).length > 50)) {
+    return ["name", "姓名长度需为 2–50 个字符"]
+  }
+  if (!user.value?.identity_locked && studentId && !/^\d{8}$/.test(studentId)) return ["student_id", "学号必须是 8 位数字"]
   if (collegeDraft.value && !collegeOptions.value.some((college) => college.code === collegeDraft.value)) {
     return ["college", "请选择有效学院"]
   }
@@ -1560,11 +1596,13 @@ async function saveMyProfile() {
   try {
     user.value = await api.updateMeProfile(
       {
-        student_id: studentIdDraft.value.trim() || null,
+        ...(!user.value.identity_locked ? { name: nameDraft.value.trim() } : {}),
+        ...(!user.value.identity_locked ? { student_id: studentIdDraft.value.trim() || null } : {}),
         team_group: teamGroupDraft.value || null,
         college: collegeDraft.value || null,
       },
     )
+    nameDraft.value = user.value.name
     studentIdDraft.value = user.value.student_id ?? ""
     teamGroupDraft.value = user.value.team_group ?? ""
     collegeDraft.value = user.value.college ?? ""
@@ -2528,12 +2566,23 @@ onBeforeUnmount(() => {
     <section class="auth-form">
       <p class="brand">TARS BASE</p>
       <template v-if="invitation">
-        <h1>设置密码</h1>
+        <h1>完成注册并设置密码</h1>
         <div class="identity">
-          <strong>{{ invitation.name }}</strong>
           <span>{{ invitation.email }}</span>
         </div>
         <form @submit.prevent="submitInvitation">
+          <label>
+            姓名
+            <input v-model="inviteName" autocomplete="name" minlength="2" maxlength="50" required />
+          </label>
+          <label>
+            学号
+            <input v-model="inviteStudentId" inputmode="numeric" autocomplete="off" maxlength="8" required />
+          </label>
+          <label>
+            学院
+            <CollegeSelect v-model="inviteCollege" :options="collegeOptions" required />
+          </label>
           <label>
             密码
             <input
@@ -3939,8 +3988,15 @@ onBeforeUnmount(() => {
           <h2>学校信息</h2>
           <form class="profile-student-edit-form" @submit.prevent="saveMyProfile">
             <label>
+              <span>姓名</span>
+              <input v-if="!user?.identity_locked" v-model="nameDraft" maxlength="50" autocomplete="name" />
+              <input v-else :value="user?.name ?? ''" readonly />
+              <small v-if="profileFieldErrors.name" class="field-error">{{ profileFieldErrors.name }}</small>
+            </label>
+            <label>
               <span>学号</span>
               <input
+                v-if="!user?.identity_locked"
                 v-model="studentIdDraft"
                 maxlength="8"
                 inputmode="numeric"
@@ -3949,8 +4005,10 @@ onBeforeUnmount(() => {
                 :aria-invalid="Boolean(profileFieldErrors.student_id)"
                 @input="clearProfileFieldError('student_id')"
               />
+              <input v-else :value="user?.student_id || '学号未填写'" readonly />
               <small v-if="profileFieldErrors.student_id" class="field-error">{{ profileFieldErrors.student_id }}</small>
             </label>
+            <p class="form-help">姓名和学号注册后不可自行修改。如需更正，请联系管理员。</p>
             <label>
               <span>所属组别</span>
               <select v-model="teamGroupDraft">
