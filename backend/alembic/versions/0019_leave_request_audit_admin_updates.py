@@ -1,6 +1,6 @@
 """record leave document requests and per-admin updates
 
-Revision ID: 0019_leave_request_audit_admin_updates
+Revision ID: 0019_leave_admin_updates
 Revises: 0018_leave_security
 Create Date: 2026-10-13
 """
@@ -11,7 +11,7 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision: str = "0019_leave_request_audit_admin_updates"
+revision: str = "0019_leave_admin_updates"
 down_revision: Union[str, Sequence[str], None] = "0018_leave_security"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
