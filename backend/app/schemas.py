@@ -95,6 +95,7 @@ class MemberOut(BaseModel):
     team_membership: TeamMembership | None = None
     role: Role
     status: MemberStatus
+    identity_locked: bool = False
     created_at: datetime
 
 
@@ -126,11 +127,31 @@ class InviteOut(BaseModel):
 class InvitationInfo(BaseModel):
     name: str
     email: str
+    student_id: str | None = None
+    college: str | None = None
     expires_at: datetime
 
 
 class InvitationAccept(BaseModel):
     password: str = Field(min_length=8, max_length=128)
+    name: str
+    student_id: str
+    college: str
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        return validate_member_name(value)
+
+    @field_validator("student_id")
+    @classmethod
+    def validate_student_id_value(cls, value: str) -> str:
+        return validate_student_id(value)
+
+    @field_validator("college")
+    @classmethod
+    def validate_college_value(cls, value: str) -> str:
+        return validate_college(value)
 
 
 class TeamRegistrationInfo(BaseModel):
@@ -195,21 +216,10 @@ class TaskAssigneeOut(BaseModel):
 class MemberProfileUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    name: str | None = None
     student_id: str | None = None
     team_group: TeamGroup | None = None
     college: str | None = None
-
-    @field_validator("student_id")
-    @classmethod
-    def normalize_student_id(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        value = value.strip()
-        if not value:
-            return None
-        if len(value) != 8 or not value.isascii() or not value.isdigit():
-            raise ValueError("学号必须是 8 位数字")
-        return value
 
     @field_validator("college")
     @classmethod
@@ -226,6 +236,34 @@ class MemberProfileUpdate(BaseModel):
 
 class AdminMemberProfileUpdate(MemberProfileUpdate):
     team_membership: TeamMembership | None = None
+
+    @field_validator("name")
+    @classmethod
+    def validate_admin_name(cls, value: str | None) -> str:
+        if value is None:
+            raise ValueError("姓名不能为空")
+        return validate_member_name(value)
+
+    @field_validator("student_id")
+    @classmethod
+    def normalize_admin_student_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            return None
+        return validate_student_id(value)
+
+
+class MemberIdentityAuditOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    member_id: int
+    admin_id: int | None
+    field: Literal["name", "student_id"]
+    old_value: str | None
+    new_value: str | None
+    changed_at: datetime
 
 
 def _normalize_school_leave_datetime(value: datetime) -> datetime:
@@ -396,6 +434,7 @@ class DailyLeavePublicEntryCreate(BaseModel):
     name: str
     student_id: str
     college: str
+    download_credential: str = Field(min_length=43, max_length=43)
 
     @field_validator("name")
     @classmethod
@@ -411,6 +450,14 @@ class DailyLeavePublicEntryCreate(BaseModel):
     @classmethod
     def check_college(cls, value: str) -> str:
         return validate_college(value)
+
+    @field_validator("download_credential")
+    @classmethod
+    def check_download_credential(cls, value: str) -> str:
+        allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+        if any(char not in allowed for char in value) or len(set(value)) < 16:
+            raise ValueError("下载凭证格式无效，请刷新页面后重试")
+        return value
 
 
 class SchoolLeaveReasonUpdate(BaseModel):

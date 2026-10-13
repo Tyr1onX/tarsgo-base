@@ -48,7 +48,7 @@ assert.ok(team.includes('v-for="member in disabledMembers"'))
 assert.ok(team.includes('member.status === "disabled") return "已停用"'))
 assert.doesNotMatch(team, /return member\.status/)
 
-// Member detail remains an admin-only route and edits only school/team profile fields.
+// Member detail remains an admin-only route and provides audited identity correction.
 assert.ok(app.includes('const MemberDetailPage = defineLazyPage(() => import("./pages/MemberDetailPage.vue"))'))
 assert.ok(app.includes("const teamMemberDetailId = computed"))
 assert.ok(app.includes('const match = path.value.match(/^\\/team\\/(\\d+)$/)'))
@@ -61,7 +61,10 @@ assert.ok(detailLoader.includes('navigate("/")'))
 assert.ok(detailLoader.includes("const [teamMembers] = await Promise.all([api.members(), ensureCollegeOptions()])"))
 assert.ok(detailLoader.includes("members.value = teamMembers"))
 
-assert.ok(detail.includes("<dt>姓名</dt>"))
+assert.ok(detail.includes('v-model="nameDraft"'))
+assert.ok(detail.includes("姓名与学号修改记录"))
+assert.ok(detail.includes("identityAudit"))
+assert.ok(api.includes("memberIdentityAudit"))
 assert.ok(detail.includes("member.name"))
 assert.ok(detail.includes("<dt>邮箱</dt>"))
 assert.ok(detail.includes("member.email"))

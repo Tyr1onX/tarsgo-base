@@ -16,6 +16,7 @@ const error = ref("")
 const readyDownload = ref<{ download_url: string; filename: string } | null>(null)
 const fieldErrors = ref<Record<string, string>>({})
 const draft = ref({ name: "", student_id: "", college: "" })
+const submissionCredential = ref<{ token: string; studentId: string; value: string } | null>(null)
 
 function dateTime(value: string) {
   return value.slice(0, 16).replace("T", " ")
@@ -23,15 +24,40 @@ function dateTime(value: string) {
 
 function messageOf(reason: unknown) {
   if (reason instanceof TypeError) {
-    return "网络请求未能完成。请检查网络后重试；同一报名信息会复用已有记录。"
+    return "网络请求未能完成。请检查网络后重试；已提交的记录只能通过首次下载凭证访问，凭证遗失请联系活动管理员核验身份。"
   }
   return reason instanceof Error ? reason.message : "操作失败"
+}
+
+function newDownloadCredential() {
+  if (!window.crypto?.getRandomValues) {
+    throw new Error("此浏览器无法安全生成下载凭证，请使用其他浏览器或联系活动管理员。")
+  }
+  const bytes = window.crypto.getRandomValues(new Uint8Array(32))
+  return btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "")
+}
+
+function getDownloadCredential(token: string, studentId: string) {
+  if (submissionCredential.value?.token === token && submissionCredential.value.studentId === studentId) {
+    return submissionCredential.value.value
+  }
+  const credential = newDownloadCredential()
+  submissionCredential.value = { token, studentId, value: credential }
+  return credential
+}
+
+function downloadUrlFor(file: { download_url: string; filename: string }, offline: boolean) {
+  const url = new URL(file.download_url, window.location.origin)
+  if (offline) url.searchParams.set("offline", "true")
+  else url.searchParams.delete("offline")
+  return `${url.pathname}${url.search}`
 }
 
 function requestNativeDownload(downloadUrl: string) {
   const anchor = document.createElement("a")
   anchor.href = downloadUrl
   anchor.rel = "noopener"
+  anchor.referrerPolicy = "no-referrer"
   document.body.appendChild(anchor)
   anchor.click()
   anchor.remove()
@@ -67,7 +93,18 @@ async function generate(offline = false) {
   if (saving.value) return
   error.value = ""
   fieldErrors.value = {}
-  readyDownload.value = null
+  if (readyDownload.value) {
+    readyDownload.value = {
+      ...readyDownload.value,
+      download_url: downloadUrlFor(readyDownload.value, offline),
+    }
+    try {
+      requestNativeDownload(readyDownload.value.download_url)
+    } catch {
+      error.value = "文件请求未能启动，请点击下方下载链接继续。"
+    }
+    return
+  }
   const name = draft.value.name.trim()
   const studentId = draft.value.student_id.trim()
   if (name.length < 2 || name.length > 50) setFieldError("name", "姓名长度需为 2–50 个字符")
@@ -77,14 +114,16 @@ async function generate(offline = false) {
 
   saving.value = true
   try {
+    const downloadCredential = getDownloadCredential(props.token, studentId)
     const file = await api.generatePublicDailyLeaveDocument(props.token, {
       name,
       student_id: studentId,
       college: draft.value.college,
+      download_credential: downloadCredential,
     }, offline)
-    readyDownload.value = file
-    requestNativeDownload(file.download_url)
+    readyDownload.value = { ...file, download_url: downloadUrlFor(file, offline) }
     downloaded.value = true
+    requestNativeDownload(readyDownload.value.download_url)
   } catch (reason) {
     if (reason instanceof ApiError && reason.field) setFieldError(reason.field, reason.message)
     else error.value = messageOf(reason)
@@ -113,12 +152,13 @@ onMounted(load)
       <dl class="daily-public-facts">
         <div><dt>请假时间</dt><dd>{{ dateTime(windowInfo.start_at) }} 至 {{ dateTime(windowInfo.end_at) }}</dd></div>
       </dl>
-      <template v-if="windowInfo.accepting_participants">
-        <p class="daily-public-hint">填写本人信息后即可下载个人请假条。时间固定，不能修改。</p>
+      <template>
+        <p v-if="windowInfo.accepting_participants" class="daily-public-hint">填写本人信息后即可下载个人请假条。时间固定，不能修改。</p>
+        <p v-else class="daily-public-hint">此活动已关闭或截止，不能新增报名。若此前已提交，可在本浏览器仍保留下载凭证时恢复下载；凭证遗失请联系活动管理员核验身份。</p>
         <p v-if="error" class="daily-public-error" role="alert">{{ error }}</p>
         <p v-if="readyDownload" class="daily-public-muted" role="status">
-          材料已准备好，正在向浏览器发起文件请求。请检查下载列表或文件管理器确认保存；若未出现文件，
-          <a :href="readyDownload.download_url">点此重新下载</a>。
+          报名已保存，已向浏览器发起请假条文件请求。请检查下载列表或文件管理器确认保存；若未看到文件，
+          <a :href="readyDownload.download_url" referrerpolicy="no-referrer">点击此处重新下载</a>。
         </p>
         <form @submit.prevent="generate(false)">
           <label>
@@ -143,7 +183,7 @@ onMounted(load)
             <small v-if="fieldErrors.college" class="daily-public-error">{{ fieldErrors.college }}</small>
           </label>
           <div class="daily-public-actions">
-            <button class="primary" type="submit" :disabled="saving">{{ saving ? "正在准备文件…" : downloaded ? "重新获取请假条" : "生成并下载请假条" }}</button>
+            <button class="primary" type="submit" :disabled="saving">{{ saving ? "正在准备文件…" : downloaded ? "重新下载请假条" : windowInfo.accepting_participants ? "生成并下载请假条" : "恢复已提交材料" }}</button>
             <ActionMenu
               id="daily-public-document"
               aria-label="其他下载选项"
@@ -153,9 +193,8 @@ onMounted(load)
             />
           </div>
         </form>
-        <p v-if="downloaded" class="daily-public-muted">材料已生成；再次获取不会新建报名记录。</p>
+        <p v-if="downloaded" class="daily-public-muted">报名记录已保存；重复下载不会新建记录。凭证遗失无法仅凭姓名或学号找回，请联系活动管理员核验身份。</p>
       </template>
-      <p v-else class="daily-public-muted">此链接已截止或已关闭，不能继续生成材料。</p>
     </template>
     <template v-else>
       <span class="daily-public-kicker">BASE / DAILY LEAVE</span>

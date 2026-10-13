@@ -137,6 +137,7 @@ def register_member(
         password_hash=hash_password(payload.password),
         role="member",
         status="active",
+        identity_locked=True,
     )
     db.add(member)
 

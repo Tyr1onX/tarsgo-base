@@ -57,7 +57,7 @@ assert.match(component, /window\.visualViewport\?\.addEventListener\("resize", o
 assert.match(component, /width: 100%;[\s\S]*?max-width: calc\(100vw - 24px\)/)
 assert.doesNotMatch(component, /width:\s*(?:4\d\d|[5-9]\d\d|\d{4,})px/)
 
-assert.equal((app.match(/<CollegeSelect/g) ?? []).length, 2)
+assert.equal((app.match(/<CollegeSelect/g) ?? []).length, 3)
 assert.match(app, /v-model="registrationCollege"[\s\S]*?:options="collegeOptions"[\s\S]*?required/)
 assert.match(app, /collegeOptions\.value\.some\(\(college\) => college\.code === registrationCollege\.value\)/)
 assert.match(app, /v-model="collegeDraft"[\s\S]*?:options="collegeOptions"[\s\S]*?clearable/)

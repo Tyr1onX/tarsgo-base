@@ -19,6 +19,8 @@ import type {
   CollegeOption,
   InvitationInfo,
   InviteResult,
+  InvitationAcceptPayload,
+  MemberIdentityAudit,
   ItemActivity,
   ItemActivityPage,
   ItemFactInput,
@@ -174,10 +176,10 @@ export const api = {
   logout: () => request<void>("/api/auth/logout", { method: "POST" }),
 
   invitation: (token: string) => request<InvitationInfo>(`/api/invitations/${encodeURIComponent(token)}`),
-  acceptInvitation: (token: string, password: string) =>
+  acceptInvitation: (token: string, payload: InvitationAcceptPayload) =>
     request<void>(`/api/invitations/${encodeURIComponent(token)}/accept`, {
       method: "POST",
-      body: JSON.stringify({ password }),
+      body: JSON.stringify(payload),
     }),
 
   members: () => request<Member[]>("/api/members"),
@@ -194,6 +196,8 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(payload),
     }),
+  memberIdentityAudit: (memberId: number) =>
+    request<MemberIdentityAudit[]>(`/api/members/${memberId}/identity-audit`),
 
   currentTeamRegistration: () =>
     request<TeamRegistrationWindow | null>("/api/team-registration/admin/current"),

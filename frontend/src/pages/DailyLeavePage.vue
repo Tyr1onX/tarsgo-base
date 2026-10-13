@@ -75,6 +75,7 @@ function requestNativeDownload(downloadUrl: string) {
   const anchor = document.createElement("a")
   anchor.href = downloadUrl
   anchor.rel = "noopener"
+  anchor.referrerPolicy = "no-referrer"
   document.body.appendChild(anchor)
   anchor.click()
   anchor.remove()
@@ -126,7 +127,7 @@ async function generateSelf(offline = false) {
     }, offline)
     readyDownload.value = file
     requestNativeDownload(file.download_url)
-    notice.value = "材料已准备好，正在向浏览器发起文件请求。请检查下载列表或文件管理器确认保存；若未出现文件，请使用下方链接重试。"
+    notice.value = "请假事项已保存，正在向浏览器发起文件请求。请检查下载列表或文件管理器确认保存；若未出现文件，使用下方链接重试，不会新增事项。"
   } catch (reason) {
     error.value = messageOf(reason)
   } finally {
@@ -148,7 +149,7 @@ async function generateShared(item: DailyLeaveWindowMember, offline = false) {
     const file = await api.prepareDailyLeaveWindowDocument(item.id, offline)
     readyDownload.value = file
     requestNativeDownload(file.download_url)
-    notice.value = "材料已准备好，正在向浏览器发起文件请求。请检查下载列表或文件管理器确认保存；若未出现文件，请使用下方链接重试。"
+    notice.value = "共享报名已保存，正在向浏览器发起文件请求。请检查下载列表或文件管理器确认保存；若未出现文件，使用下方链接重试。"
   } catch (reason) {
     error.value = messageOf(reason)
   } finally {
@@ -288,7 +289,7 @@ onMounted(() => {
     <p v-if="error" class="daily-leave-feedback daily-leave-error" role="alert">{{ error }}</p>
     <p v-if="notice" class="daily-leave-feedback daily-leave-notice" role="status">{{ notice }}</p>
     <p v-if="readyDownload" class="daily-leave-feedback daily-leave-notice">
-      <a :href="readyDownload.download_url">若未看到文件，请点此重新下载。</a>
+      <a :href="readyDownload.download_url" referrerpolicy="no-referrer">若未看到文件，请点此重新下载。</a>
     </p>
 
     <section class="daily-leave-section daily-leave-self">

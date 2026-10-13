@@ -91,6 +91,10 @@ jobs:
           "
           docker compose exec -T -e DB_NAME="$MIGRATION_DB" api alembic upgrade 0015_leave_v2_windows
           docker compose exec -T db mysql -uroot -p"$CI_MYSQL_ROOT_PASSWORD" tarsgo_migration -e "
+            INSERT INTO members (id, name, email, student_id, college, password_hash, role, status)
+            VALUES (102, '预填待激活成员', 'legacy-invited@example.com', '26000002', 'art', NULL, 'member', 'invited');
+          "
+          docker compose exec -T db mysql -uroot -p"$CI_MYSQL_ROOT_PASSWORD" tarsgo_migration -e "
             INSERT INTO daily_leave_windows (
               id, title, start_at, end_at, open_until, created_by
             ) VALUES (
@@ -120,6 +124,8 @@ jobs:
           test "$STUDENT_ID_NULLABLE" = "YES"
           LEGACY_STUDENT_IDS="$(docker compose exec -T db mysql -uroot -p"$CI_MYSQL_ROOT_PASSWORD" -N -B tarsgo_migration -e "SELECT COUNT(*) FROM members WHERE id IN (100, 101) AND student_id IS NULL")"
           test "$LEGACY_STUDENT_IDS" = "2"
+          IDENTITY_LOCK_BACKFILL="$(docker compose exec -T db mysql -uroot -p"$CI_MYSQL_ROOT_PASSWORD" -N -B tarsgo_migration -e "SELECT CONCAT((SELECT identity_locked FROM members WHERE id = 100), '|', (SELECT identity_locked FROM members WHERE id = 101), '|', (SELECT identity_locked FROM members WHERE id = 102))")"
+          test "$IDENTITY_LOCK_BACKFILL" = "1|1|0"
           COLLEGE_NULLABLE="$(docker compose exec -T db mysql -uroot -p"$CI_MYSQL_ROOT_PASSWORD" -N -B -e "SELECT IS_NULLABLE FROM information_schema.columns WHERE table_schema = 'tarsgo_migration' AND table_name = 'members' AND column_name = 'college'")"
           test "$COLLEGE_NULLABLE" = "YES"
           TEAM_MEMBERSHIP_NULLABLE="$(docker compose exec -T db mysql -uroot -p"$CI_MYSQL_ROOT_PASSWORD" -N -B -e "SELECT IS_NULLABLE FROM information_schema.columns WHERE table_schema = 'tarsgo_migration' AND table_name = 'members' AND column_name = 'team_membership'")"
@@ -187,6 +193,7 @@ jobs:
                       password_hash=hash_password(os.environ["CI_ADMIN_PASSWORD"]),
                       role="admin",
                       status="active",
+                      identity_locked=True,
                   )
               )
               db.commit()

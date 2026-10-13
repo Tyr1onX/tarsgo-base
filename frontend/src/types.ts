@@ -17,7 +17,18 @@ export interface Member {
   team_membership: TeamMembership | null
   role: Role
   status: MemberStatus
+  identity_locked: boolean
   created_at: string
+}
+
+export interface MemberIdentityAudit {
+  id: number
+  member_id: number
+  admin_id: number | null
+  field: "name" | "student_id"
+  old_value: string | null
+  new_value: string | null
+  changed_at: string
 }
 
 export interface MemberSummary {
@@ -131,6 +142,7 @@ export interface CollegeOption {
 }
 
 export interface MemberProfilePayload {
+  name?: string
   student_id: string | null
   team_group: TeamGroup | null
   college: string | null
@@ -138,7 +150,8 @@ export interface MemberProfilePayload {
 }
 
 export interface MyProfilePayload {
-  student_id: string | null
+  name?: string
+  student_id?: string | null
   team_group: TeamGroup | null
   college: string | null
 }
@@ -146,7 +159,16 @@ export interface MyProfilePayload {
 export interface InvitationInfo {
   name: string
   email: string
+  student_id: string | null
+  college: string | null
   expires_at: string
+}
+
+export interface InvitationAcceptPayload {
+  name: string
+  student_id: string
+  college: string
+  password: string
 }
 
 export interface TeamRegistrationInfo {
@@ -317,6 +339,7 @@ export interface DailyLeavePublicEntry {
   name: string
   student_id: string
   college: string
+  download_credential: string
 }
 
 export type CampLeaveType = "winter" | "summer"

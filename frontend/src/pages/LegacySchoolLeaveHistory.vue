@@ -168,7 +168,7 @@ onMounted(() => {
         >
           <summary>查看历史生成时间（{{ record.generation_times.length }} 次）</summary>
           <ul>
-            <li v-for="time in record.generation_times" :key="time">{{ dateTime(time) }}</li>
+            <li v-for="(time, index) in record.generation_times" :key="`${record.id}:${index}:${time}`">{{ dateTime(time) }}</li>
           </ul>
         </details>
       </article>
