@@ -254,10 +254,6 @@ async function restoreCapability(saved: SavedCapability, offline = false) {
   }
 }
 
-function maskedStudentId(studentId: string) {
-  return `${"•".repeat(Math.max(0, studentId.length - 2))}${studentId.slice(-2)}`
-}
-
 function onMenuAction(action: string) {
   if (action === "offline") void generate(true)
 }
@@ -295,7 +291,7 @@ onMounted(load)
           <p class="daily-public-muted">恢复记录使用本标签页保存的下载凭证，不会按姓名或学号重新领取。凭证有效期为 7 天。</p>
           <ul>
             <li v-for="saved in savedCapabilities" :key="saved.storageId">
-              <span>{{ saved.name }} · 学号尾号 {{ maskedStudentId(saved.studentId) }} · {{ new Date(saved.createdAt).toLocaleString() }}</span>
+              <span>提交时间：{{ new Date(saved.createdAt).toLocaleString() }}</span>
               <button type="button" :disabled="saving" @click="restoreCapability(saved)">
                 {{ saving ? "正在恢复…" : "恢复并获取材料" }}
               </button>
