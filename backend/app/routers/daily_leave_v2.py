@@ -11,8 +11,8 @@ from sqlalchemy.orm import Session
 from ..auth import get_current_member, hash_token, new_token, require_admin, utcnow
 from ..college_dictionary import COLLEGE_BY_CODE
 from ..db import get_db
-from ..leave_documents import DOCX_MIME_TYPE, build_daily_leave_v2_docx
-from ..models import DailyLeaveEntry, DailyLeaveWindow, Member
+from ..leave_documents import DAILY_LEAVE_DOCUMENT_VERSION, DOCX_MIME_TYPE, build_daily_leave_v2_docx
+from ..models import AdminUpdateEvent, DailyLeaveDocumentRequest, DailyLeaveEntry, DailyLeaveWindow, Member
 from ..schemas import (
     DailyLeavePublicEntryCreate,
     DailyLeavePublicWindowOut,
@@ -156,6 +156,35 @@ def _daily_filename(start_at: datetime, *, offline: bool) -> str:
     return f"{kind}_{start_at:%Y-%m-%d}.docx"
 
 
+def _record_document_request(
+    db: Session,
+    entry: DailyLeaveEntry,
+    *,
+    requested_by_member_id: int | None,
+    first_generation: bool,
+    offline: bool,
+) -> None:
+    # This records the user's file request. The later document response may still fail,
+    # so this event must not be interpreted as a successful download.
+    db.add(
+        DailyLeaveDocumentRequest(
+            entry_id=entry.id,
+            requested_by_member_id=requested_by_member_id,
+            request_type="first_generation" if first_generation else "repeat_download",
+            file_version=DAILY_LEAVE_DOCUMENT_VERSION,
+            offline=offline,
+        )
+    )
+    if first_generation:
+        db.add(
+            AdminUpdateEvent(
+                event_type="leave_record_created",
+                entity_type="daily_leave_entry",
+                entity_id=entry.id,
+            )
+        )
+
+
 def _member_identity(current: Member) -> tuple[str, str, str]:
     try:
         return (
@@ -271,6 +300,7 @@ def member_document(
         .where(DailyLeaveEntry.window_id == window.id, DailyLeaveEntry.member_id == current.id)
         .with_for_update()
     )
+    first_generation = entry is None
     if entry is None:
         name, student_id, college = _member_identity(current)
         collision = db.scalar(
@@ -292,12 +322,21 @@ def member_document(
             end_at=None,
         )
         db.add(entry)
-        try:
-            db.commit()
-            db.refresh(entry)
-        except IntegrityError as exc:
-            db.rollback()
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="该学号已在本窗口生成材料") from exc
+        db.flush()
+
+    _record_document_request(
+        db,
+        entry,
+        requested_by_member_id=current.id,
+        first_generation=first_generation,
+        offline=offline,
+    )
+    try:
+        db.commit()
+        db.refresh(entry)
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="该学号已在本窗口生成材料") from exc
 
     filename = _daily_filename(window.start_at, offline=offline)
     download_url = f"/api/daily-leave/windows/{window.id}/document"
@@ -353,6 +392,7 @@ def self_service_document(
         )
         .with_for_update()
     )
+    first_generation = entry is None
     if entry is None:
         name, student_id, college = _member_identity(current)
         entry = DailyLeaveEntry(
@@ -367,6 +407,13 @@ def self_service_document(
         )
         db.add(entry)
         db.flush()
+    _record_document_request(
+        db,
+        entry,
+        requested_by_member_id=current.id,
+        first_generation=first_generation,
+        offline=offline,
+    )
     db.commit()
     filename = _daily_filename(payload.start_at, offline=offline)
     download_url = f"/api/daily-leave/self-service/document/{entry.id}"
@@ -439,6 +486,14 @@ def public_document(
                     status_code=status.HTTP_410_GONE,
                     detail="下载凭证已过期；请联系活动管理员核验身份。",
                 )
+            _record_document_request(
+                db,
+                entry,
+                requested_by_member_id=None,
+                first_generation=False,
+                offline=offline,
+            )
+            db.commit()
             download_url = f"/api/daily-leave/public-download/{payload.download_credential}"
             if offline:
                 download_url += "?offline=true"
@@ -460,6 +515,14 @@ def public_document(
     )
     db.add(entry)
     try:
+        db.flush()
+        _record_document_request(
+            db,
+            entry,
+            requested_by_member_id=None,
+            first_generation=True,
+            offline=offline,
+        )
         db.commit()
     except IntegrityError as exc:
         db.rollback()

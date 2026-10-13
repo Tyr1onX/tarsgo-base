@@ -24,6 +24,7 @@ from .school_leave import (
 
 
 DOCX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+DAILY_LEAVE_DOCUMENT_VERSION = "daily-leave-v2"
 TEMPLATE_DIR = Path(__file__).with_name("templates")
 DAILY_TEMPLATE_PATH = TEMPLATE_DIR / "school_leave.docx"
 CAMP_TEMPLATE_PATH = TEMPLATE_DIR / "camp_leave_v2.docx"

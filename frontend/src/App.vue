@@ -154,6 +154,7 @@ const registrationPath = ref("")
 const openingRegistration = ref(false)
 const closingRegistration = ref(false)
 const schoolLeaveTodoCount = ref(0)
+const adminUpdateUnreadCount = ref(0)
 
 const tasks = ref<Task[]>([])
 const homeMineTasks = ref<Task[]>([])
@@ -1081,13 +1082,23 @@ async function loadSchoolLeaveSummary() {
   }
 }
 
+async function loadAdminUpdateUnreadCount() {
+  if (user.value?.role !== "admin") {
+    adminUpdateUnreadCount.value = 0
+    return
+  }
+  try {
+    adminUpdateUnreadCount.value = (await api.adminUpdateUnreadCount()).unread_count
+  } catch { /* Keep the last known count if a refresh temporarily fails. */ }
+}
+
 async function loadCurrentUser() {
   try {
     user.value = await api.me()
     studentIdDraft.value = user.value.student_id ?? ""
     teamGroupDraft.value = user.value.team_group ?? ""
     collegeDraft.value = user.value.college ?? ""
-    await Promise.all([loadAIReviewAccess(), loadSchoolLeaveSummary()])
+    await Promise.all([loadAIReviewAccess(), loadSchoolLeaveSummary(), loadAdminUpdateUnreadCount()])
   } catch (reason) {
     if (reason instanceof ApiError && reason.status === 401) {
       user.value = null
@@ -1280,6 +1291,7 @@ async function loadRoute() {
       registrationPath.value = ""
     } else if (routePath === "/leave") {
       // The leave page loads its own independent workflow data.
+      void loadAdminUpdateUnreadCount()
     } else if (routePath === "/me/edit") {
       await ensureCollegeOptions()
       if (!isCurrentLoad()) return
@@ -2753,7 +2765,9 @@ onBeforeUnmount(() => {
           任务
         </button>
         <button :class="{ active: path === '/leave' }" type="button" @click="navigate('/leave')">
-          请假 <span v-if="isAdmin && schoolLeaveTodoCount" class="nav-count">{{ schoolLeaveTodoCount }}</span>
+          请假
+          <span v-if="isAdmin && adminUpdateUnreadCount" class="nav-unread-dot" role="img" aria-label="有未读请假事项"></span>
+          <span v-if="isAdmin && schoolLeaveTodoCount" class="nav-count">{{ schoolLeaveTodoCount }}</span>
         </button>
         <button
           v-if="isAdmin"
@@ -4045,6 +4059,7 @@ onBeforeUnmount(() => {
           :current-user="user"
           @navigate="navigate"
           @todo-count="schoolLeaveTodoCount = $event"
+          @unread-count="adminUpdateUnreadCount = $event"
         />
       </template>
 
@@ -4113,7 +4128,7 @@ onBeforeUnmount(() => {
         任务
       </button>
       <button :class="{ active: path === '/leave' }" type="button" @click="navigate('/leave')">
-        请假<span v-if="isAdmin && schoolLeaveTodoCount" class="nav-count">{{ schoolLeaveTodoCount }}</span>
+        请假<span v-if="isAdmin && adminUpdateUnreadCount" class="nav-unread-dot" role="img" aria-label="有未读请假事项"></span><span v-if="isAdmin && schoolLeaveTodoCount" class="nav-count">{{ schoolLeaveTodoCount }}</span>
       </button>
       <button
         v-if="isAdmin"

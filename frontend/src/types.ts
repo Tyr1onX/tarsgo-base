@@ -233,6 +233,25 @@ export interface AdminLeaveRecord {
   summary_status: SchoolLeaveRunStatus | null
   generation_count: number
   generation_times: string[]
+  document_request_count: number
+  document_requests: {
+    id: number
+    request_type: "first_generation" | "repeat_download"
+    file_version: string
+    offline: boolean
+    requested_at: string
+  }[]
+  is_unread: boolean
+  update_event_ids: number[]
+}
+
+export interface AdminUpdateUnreadCount {
+  unread_count: number
+}
+
+export interface AdminUpdateMarkRead {
+  marked_count: number
+  unread_count: number
 }
 
 export interface DailyLeaveDocumentReady {

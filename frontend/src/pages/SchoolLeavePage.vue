@@ -7,7 +7,7 @@ import LegacySchoolLeaveHistory from "./LegacySchoolLeaveHistory.vue"
 import type { Member } from "../types"
 
 const props = defineProps<{ currentUser: Member }>()
-const emit = defineEmits<{ navigate: [path: string]; todoCount: [count: number] }>()
+const emit = defineEmits<{ navigate: [path: string]; todoCount: [count: number]; unreadCount: [count: number] }>()
 const activeSection = ref<"daily" | "camp" | "records">("daily")
 const isAdmin = props.currentUser.role === "admin"
 </script>
@@ -33,7 +33,7 @@ const isAdmin = props.currentUser.role === "admin"
   </template>
   <template v-else-if="isAdmin">
     <div class="page-title leave-page-title"><h1>请假记录</h1></div>
-    <LegacySchoolLeaveHistory :current-user="props.currentUser" />
+    <LegacySchoolLeaveHistory :current-user="props.currentUser" @unread-count="emit('unreadCount', $event)" />
   </template>
 </template>
 
