@@ -329,6 +329,68 @@ class DailyLeaveEntry(Base):
     member: Mapped[Member | None] = relationship()
 
 
+class DailyLeaveDocumentRequest(Base):
+    __tablename__ = "daily_leave_document_requests"
+    __table_args__ = (
+        CheckConstraint(
+            "request_stage IN ('prepare','download')",
+            name="ck_daily_leave_document_requests_stage",
+        ),
+        CheckConstraint(
+            "request_type IN ('first_generation','repeat_download')",
+            name="ck_daily_leave_document_requests_type",
+        ),
+        Index(
+            "ix_daily_leave_document_requests_entry_stage_requested",
+            "entry_id",
+            "request_stage",
+            "requested_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    entry_id: Mapped[int] = mapped_column(
+        ForeignKey("daily_leave_entries.id", ondelete="CASCADE"), nullable=False
+    )
+    requested_by_member_id: Mapped[int | None] = mapped_column(
+        ForeignKey("members.id", ondelete="SET NULL"), nullable=True
+    )
+    request_stage: Mapped[str] = mapped_column(String(20), nullable=False)
+    request_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    file_version: Mapped[str] = mapped_column(String(50), nullable=False)
+    offline: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(), server_default=func.now(), nullable=False)
+
+
+class AdminUpdateEvent(Base):
+    __tablename__ = "admin_update_events"
+    __table_args__ = (
+        UniqueConstraint("event_type", "entity_type", "entity_id", name="uq_admin_update_event_entity"),
+        Index("ix_admin_update_events_created", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    event_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    entity_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    entity_id: Mapped[int] = mapped_column(Integer(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(), server_default=func.now(), nullable=False)
+
+
+class AdminUpdateRead(Base):
+    __tablename__ = "admin_update_reads"
+    __table_args__ = (
+        UniqueConstraint("event_id", "admin_id", name="uq_admin_update_reads_event_admin"),
+        Index("ix_admin_update_reads_admin", "admin_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    event_id: Mapped[int] = mapped_column(
+        ForeignKey("admin_update_events.id", ondelete="CASCADE"), nullable=False
+    )
+    admin_id: Mapped[int] = mapped_column(ForeignKey("members.id", ondelete="CASCADE"), nullable=False)
+    read_at: Mapped[datetime] = mapped_column(DateTime(), server_default=func.now(), nullable=False)
+
+
 class CampLeaveEvent(Base):
     __tablename__ = "camp_leave_events"
     __table_args__ = (

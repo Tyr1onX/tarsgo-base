@@ -5,6 +5,7 @@ import { api } from "../api"
 import type { AdminLeaveRecord, AdminLeaveRecordType, Member } from "../types"
 
 const props = defineProps<{ currentUser: Member }>()
+const emit = defineEmits<{ unreadCount: [count: number] }>()
 const records = ref<AdminLeaveRecord[]>([])
 const isAdmin = props.currentUser.role === "admin"
 const loading = ref(isAdmin)
@@ -13,6 +14,7 @@ const nameFilter = ref("")
 const dateFrom = ref("")
 const dateTo = ref("")
 const recordType = ref<AdminLeaveRecordType | "">("")
+const markingReadId = ref<string | null>(null)
 
 function dateTime(value: string) {
   return value.slice(0, 16).replace("T", " ")
@@ -48,18 +50,49 @@ async function loadRecords() {
   loading.value = true
   error.value = ""
   try {
-    records.value = await api.adminLeaveRecords({
-      name: nameFilter.value,
-      date_from: dateFrom.value,
-      date_to: dateTo.value,
-      record_type: recordType.value || undefined,
-    })
+    const [nextRecords, updates] = await Promise.all([
+      api.adminLeaveRecords({
+        name: nameFilter.value,
+        date_from: dateFrom.value,
+        date_to: dateTo.value,
+        record_type: recordType.value || undefined,
+      }),
+      api.adminUpdateUnreadCount().catch(() => null),
+    ])
+    records.value = nextRecords
+    if (updates) emit("unreadCount", updates.unread_count)
   } catch (reason) {
     records.value = []
     error.value = reason instanceof Error ? reason.message : "请假记录加载失败"
   } finally {
     loading.value = false
   }
+}
+
+async function markRead(record: AdminLeaveRecord) {
+  if (!record.is_unread || !record.update_event_ids.length || markingReadId.value) return
+  markingReadId.value = record.id
+  error.value = ""
+  try {
+    const result = await api.markAdminUpdatesRead(record.update_event_ids)
+    records.value = records.value.map((item) => item.id === record.id ? { ...item, is_unread: false } : item)
+    emit("unreadCount", result.unread_count)
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : "标记已读失败"
+  } finally {
+    markingReadId.value = null
+  }
+}
+
+function requestDescription(requestStage: "prepare" | "download", requestType: "first_generation" | "repeat_download") {
+  if (requestStage === "prepare") {
+    return requestType === "first_generation" ? "首次生成准备" : "重复准备请求"
+  }
+  return requestType === "first_generation" ? "首次文件请求" : "重复下载请求"
+}
+
+function requestStageLabel(requestStage: "prepare" | "download") {
+  return requestStage === "prepare" ? "POST 准备" : "GET 文件"
 }
 
 function applyFilters() {
@@ -87,7 +120,7 @@ onMounted(() => {
 <template>
   <section class="legacy-leave-history" aria-label="成员请假记录">
     <p class="leave-records-note">
-      请假条生成记录只表示材料已生成或提交，不代表请假已获批准。正式申请状态显示申请及旧版汇总进度。
+      请假条记录显示成员提交的文件请求，不代表文件已成功下载或请假已获批准。正式申请状态显示申请及旧版汇总进度。
     </p>
 
     <form class="leave-record-filters" @submit.prevent="applyFilters">
@@ -131,19 +164,31 @@ onMounted(() => {
         <div class="leave-record-tags">
           <span class="leave-record-type">{{ recordTypeLabel(record) }}</span>
           <span>{{ sourceLabel(record) }}</span>
+          <span v-if="record.is_unread" class="leave-record-unread">新事项</span>
         </div>
+        <button
+          v-if="record.is_unread"
+          class="leave-record-mark-read"
+          type="button"
+          :disabled="markingReadId !== null"
+          @click="markRead(record)"
+        >{{ markingReadId === record.id ? "保存中…" : "标记已读" }}</button>
         <dl class="leave-record-details">
           <div>
             <dt>请假时间</dt>
             <dd>{{ dateTime(record.start_at) }} 至 {{ dateTime(record.end_at) }}</dd>
           </div>
           <div>
-            <dt>{{ record.record_type === "generated" ? "生成记录时间" : "提交时间" }}</dt>
+            <dt>{{ record.record_type === "generated" ? "请假事项时间" : "提交时间" }}</dt>
             <dd>{{ dateTime(record.recorded_at) }}</dd>
           </div>
           <div v-if="record.record_type === 'generated'">
-            <dt>历史生成次数</dt>
+            <dt>历史记录数</dt>
             <dd>{{ record.generation_count }} 次</dd>
+          </div>
+          <div v-if="record.record_type === 'generated'">
+            <dt>文件请求留痕</dt>
+            <dd>POST 准备 {{ record.prepare_request_count }} 次；GET 文件 {{ record.download_request_count }} 次。记录请求次数，不代表下载成功。</dd>
           </div>
           <div v-if="record.activity_title">
             <dt>{{ record.source_type === "shared_activity" ? "关联活动" : "关联旧版汇总" }}</dt>
@@ -162,11 +207,24 @@ onMounted(() => {
             <dd>{{ summaryStatusLabel(record.summary_status) }}</dd>
           </div>
         </dl>
+        <details v-if="record.record_type === 'generated' && record.document_requests.length" class="leave-record-generation-times">
+          <summary>查看文件请求（{{ record.document_request_count }} 次）</summary>
+          <ul>
+            <li v-for="request in record.document_requests" :key="request.id">
+              {{ dateTime(request.requested_at) }} · {{ requestStageLabel(request.request_stage) }} ·
+              {{ requestDescription(request.request_stage, request.request_type) }} ·
+              {{ request.file_version }}{{ request.offline ? "（线下签章版）" : "" }}
+            </li>
+          </ul>
+        </details>
+        <p v-else-if="record.record_type === 'generated'" class="leave-record-request-note">
+          此历史记录没有上线后的文件请求留痕，默认按已读处理。
+        </p>
         <details
           v-if="record.record_type === 'generated' && record.generation_times.length > 1"
           class="leave-record-generation-times"
         >
-          <summary>查看历史生成时间（{{ record.generation_times.length }} 次）</summary>
+          <summary>查看历史事项记录时间（{{ record.generation_times.length }} 条）</summary>
           <ul>
             <li v-for="(time, index) in record.generation_times" :key="`${record.id}:${index}:${time}`">{{ dateTime(time) }}</li>
           </ul>
@@ -194,6 +252,9 @@ onMounted(() => {
 .leave-record-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; color: var(--muted); font-size: 11px; }
 .leave-record-tags span { padding: 3px 7px; border-radius: 999px; background: var(--surface-raised, var(--line)); }
 .leave-record-tags .leave-record-type { color: var(--text); font-weight: 560; }
+.leave-record-tags .leave-record-unread { background: var(--hover); color: var(--danger); font-weight: 650; }
+.leave-record-mark-read { margin-top: 9px; padding: 0; border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 12px; cursor: pointer; }
+.leave-record-mark-read:disabled { cursor: wait; opacity: .55; }
 .leave-record-details { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px 18px; margin: 11px 0 0; }
 .leave-record-details div { min-width: 0; }
 .leave-record-details dt { margin-bottom: 3px; color: var(--faint); font-size: 11px; }
@@ -201,6 +262,7 @@ onMounted(() => {
 .leave-record-generation-times { margin-top: 10px; color: var(--muted); font-size: 12px; }
 .leave-record-generation-times summary { cursor: pointer; }
 .leave-record-generation-times ul { display: grid; gap: 4px; margin: 7px 0 0; padding-left: 20px; }
+.leave-record-request-note { margin: 9px 0 0; color: var(--faint); font-size: 11px; line-height: 1.5; }
 @media (max-width: 680px) {
   .leave-record-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

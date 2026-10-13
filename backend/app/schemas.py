@@ -16,6 +16,8 @@ SchoolLeaveRunStatus = Literal["ready", "awaiting_return", "completed", "cancell
 SchoolLeaveResultState = Literal["available", "cleared"]
 AdminLeaveRecordType = Literal["generated", "formal_application"]
 AdminLeaveRecordSource = Literal["self_service", "shared_activity", "legacy_application"]
+DailyLeaveDocumentRequestType = Literal["first_generation", "repeat_download"]
+DailyLeaveDocumentRequestStage = Literal["prepare", "download"]
 CampLeaveType = Literal["winter", "summer"]
 CampLeaveStatus = Literal["collecting", "closed"]
 CampLeaveParticipantType = Literal["formal", "reserve", "other"]
@@ -312,6 +314,15 @@ class SchoolLeaveRequestOut(BaseModel):
     updated_at: datetime
 
 
+class DailyLeaveDocumentRequestOut(BaseModel):
+    id: int
+    request_stage: DailyLeaveDocumentRequestStage
+    request_type: DailyLeaveDocumentRequestType
+    file_version: str
+    offline: bool
+    requested_at: datetime
+
+
 class AdminLeaveRecordOut(BaseModel):
     id: str
     name: str
@@ -327,6 +338,32 @@ class AdminLeaveRecordOut(BaseModel):
     summary_status: SchoolLeaveRunStatus | None = None
     generation_count: int = 1
     generation_times: list[datetime] = Field(default_factory=list)
+    document_request_count: int = 0
+    prepare_request_count: int = 0
+    download_request_count: int = 0
+    document_requests: list[DailyLeaveDocumentRequestOut] = Field(default_factory=list)
+    is_unread: bool = False
+    update_event_ids: list[int] = Field(default_factory=list)
+
+
+class AdminUpdateUnreadCountOut(BaseModel):
+    unread_count: int
+
+
+class AdminUpdateMarkReadIn(BaseModel):
+    event_ids: list[int] = Field(min_length=1, max_length=100)
+
+    @field_validator("event_ids")
+    @classmethod
+    def validate_event_ids(cls, value: list[int]) -> list[int]:
+        if any(event_id <= 0 for event_id in value):
+            raise ValueError("事件编号无效")
+        return list(dict.fromkeys(value))
+
+
+class AdminUpdateMarkReadOut(BaseModel):
+    marked_count: int
+    unread_count: int
 
 
 class DailyLeaveDocumentReadyOut(BaseModel):

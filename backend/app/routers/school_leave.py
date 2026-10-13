@@ -12,7 +12,10 @@ from sqlalchemy.orm import Session
 from ..auth import get_current_member, require_admin
 from ..db import get_db
 from ..models import (
+    AdminUpdateEvent,
+    AdminUpdateRead,
     DailyLeaveEntry,
+    DailyLeaveDocumentRequest,
     DailyLeaveWindow,
     Member,
     SchoolLeaveGroupResult,
@@ -22,6 +25,7 @@ from ..models import (
 from ..schemas import (
     AdminLeaveRecordOut,
     AdminLeaveRecordType,
+    DailyLeaveDocumentRequestOut,
     MemberSummary,
     SchoolLeaveAdminConfigOut,
     SchoolLeaveAdminSummaryOut,
@@ -97,6 +101,37 @@ def _request_out(
 
 def _run_groups(db: Session, run: SchoolLeaveRun):
     return group_school_leave_requests(requests_for_run(db, run.id))
+
+
+def _update_events_for_entities(
+    db: Session,
+    *,
+    entity_type: str,
+    entity_ids: list[int],
+) -> dict[int, int]:
+    if not entity_ids:
+        return {}
+    events = db.scalars(
+        select(AdminUpdateEvent).where(
+            AdminUpdateEvent.event_type == "leave_record_created",
+            AdminUpdateEvent.entity_type == entity_type,
+            AdminUpdateEvent.entity_id.in_(entity_ids),
+        )
+    )
+    return {event.entity_id: event.id for event in events}
+
+
+def _read_event_ids(db: Session, *, admin_id: int, event_ids: list[int]) -> set[int]:
+    if not event_ids:
+        return set()
+    return set(
+        db.scalars(
+            select(AdminUpdateRead.event_id).where(
+                AdminUpdateRead.admin_id == admin_id,
+                AdminUpdateRead.event_id.in_(event_ids),
+            )
+        )
+    )
 
 
 def _run_out(db: Session, run: SchoolLeaveRun) -> SchoolLeaveRunOut:
@@ -238,6 +273,14 @@ def create_request(
         status="pending",
     )
     db.add(request)
+    db.flush()
+    db.add(
+        AdminUpdateEvent(
+            event_type="leave_record_created",
+            entity_type="school_leave_request",
+            entity_id=request.id,
+        )
+    )
     db.commit()
     db.refresh(request)
     return _request_out(request)
@@ -332,7 +375,7 @@ def admin_list_leave_records(
     date_from: date | None = None,
     date_to: date | None = None,
     record_type: AdminLeaveRecordType | None = None,
-    _: Member = Depends(require_admin),
+    current: Member = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> list[AdminLeaveRecordOut]:
     """Read the member-facing daily leave history without changing source records."""
@@ -371,6 +414,26 @@ def admin_list_leave_records(
             .outerjoin(DailyLeaveWindow, DailyLeaveWindow.id == DailyLeaveEntry.window_id)
             .where(*generated_filters)
         ).all()
+        generated_entry_ids = [entry.id for entry, _ in generated_rows]
+        requests_by_entry: dict[int, list[DailyLeaveDocumentRequest]] = {}
+        if generated_entry_ids:
+            request_logs = db.scalars(
+                select(DailyLeaveDocumentRequest)
+                .where(DailyLeaveDocumentRequest.entry_id.in_(generated_entry_ids))
+                .order_by(DailyLeaveDocumentRequest.requested_at, DailyLeaveDocumentRequest.id)
+            )
+            for request_log in request_logs:
+                requests_by_entry.setdefault(request_log.entry_id, []).append(request_log)
+        generated_event_by_entry = _update_events_for_entities(
+            db,
+            entity_type="daily_leave_entry",
+            entity_ids=generated_entry_ids,
+        )
+        generated_read_ids = _read_event_ids(
+            db,
+            admin_id=current.id,
+            event_ids=list(generated_event_by_entry.values()),
+        )
         generated_groups: dict[tuple[object, ...], list[tuple[DailyLeaveEntry, DailyLeaveWindow | None]]] = {}
         for entry, window in generated_rows:
             start_at = window.start_at if window is not None else entry.start_at
@@ -404,6 +467,25 @@ def admin_list_leave_records(
                 _database_timestamp_in_beijing(item.submitted_at)
                 for item, _ in group
             ]
+            entry_ids = [item.id for item, _ in group]
+            document_requests = [
+                DailyLeaveDocumentRequestOut(
+                    id=request_log.id,
+                    request_stage=request_log.request_stage,
+                    request_type=request_log.request_type,
+                    file_version=request_log.file_version,
+                    offline=request_log.offline,
+                    requested_at=_database_timestamp_in_beijing(request_log.requested_at),
+                )
+                for entry_id in entry_ids
+                for request_log in requests_by_entry.get(entry_id, [])
+            ]
+            document_requests.sort(key=lambda request_log: (request_log.requested_at, request_log.id))
+            update_event_ids = [
+                generated_event_by_entry[entry_id]
+                for entry_id in entry_ids
+                if entry_id in generated_event_by_entry
+            ]
             records.append(
                 AdminLeaveRecordOut(
                     id=f"generated:{entry.id}",
@@ -417,6 +499,18 @@ def admin_list_leave_records(
                     activity_title=window.title if window is not None else None,
                     generation_count=len(group),
                     generation_times=generation_times,
+                    document_request_count=len(document_requests),
+                    prepare_request_count=sum(
+                        request_log.request_stage == "prepare"
+                        for request_log in document_requests
+                    ),
+                    download_request_count=sum(
+                        request_log.request_stage == "download"
+                        for request_log in document_requests
+                    ),
+                    document_requests=document_requests,
+                    is_unread=any(event_id not in generated_read_ids for event_id in update_event_ids),
+                    update_event_ids=update_event_ids,
                 )
             )
 
@@ -433,7 +527,19 @@ def admin_list_leave_records(
             .outerjoin(SchoolLeaveRun, SchoolLeaveRun.id == SchoolLeaveRequest.run_id)
             .where(*request_filters)
         ).all()
+        application_event_by_request = _update_events_for_entities(
+            db,
+            entity_type="school_leave_request",
+            entity_ids=[request.id for request, _ in request_rows],
+        )
+        application_read_ids = _read_event_ids(
+            db,
+            admin_id=current.id,
+            event_ids=list(application_event_by_request.values()),
+        )
         for request, run in request_rows:
+            update_event_id = application_event_by_request.get(request.id)
+            update_event_ids = [update_event_id] if update_event_id is not None else []
             records.append(
                 AdminLeaveRecordOut(
                     id=f"application:{request.id}",
@@ -448,6 +554,8 @@ def admin_list_leave_records(
                     activity_at=run.collected_at if run is not None else None,
                     application_status=request.status,
                     summary_status=run.status if run is not None else None,
+                    is_unread=any(event_id not in application_read_ids for event_id in update_event_ids),
+                    update_event_ids=update_event_ids,
                 )
             )
 
@@ -570,6 +678,13 @@ def delete_run_history(
                 )
             )
         if linked_requests:
+            db.execute(
+                delete(AdminUpdateEvent).where(
+                    AdminUpdateEvent.event_type == "leave_record_created",
+                    AdminUpdateEvent.entity_type == "school_leave_request",
+                    AdminUpdateEvent.entity_id.in_([request.id for request in linked_requests]),
+                )
+            )
             db.execute(
                 delete(SchoolLeaveRequest).where(
                     SchoolLeaveRequest.id.in_([request.id for request in linked_requests])

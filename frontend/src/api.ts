@@ -43,6 +43,8 @@ import type {
   SchoolLeaveGroupResult,
   AdminLeaveRecord,
   AdminLeaveRecordFilters,
+  AdminUpdateMarkRead,
+  AdminUpdateUnreadCount,
   SchoolLeaveRequest,
   SchoolLeaveRun,
   Task,
@@ -228,6 +230,12 @@ export const api = {
     request<SchoolLeaveRequest>(`/api/school-leave/requests/${requestId}/withdraw`, { method: "POST" }),
   schoolLeaveAdminConfig: () => request<SchoolLeaveAdminConfig>("/api/school-leave/admin/config"),
   schoolLeaveAdminSummary: () => request<SchoolLeaveAdminSummary>("/api/school-leave/admin/summary"),
+  adminUpdateUnreadCount: () => request<AdminUpdateUnreadCount>("/api/admin-updates/unread-count"),
+  markAdminUpdatesRead: (eventIds: number[]) =>
+    request<AdminUpdateMarkRead>("/api/admin-updates/read", {
+      method: "POST",
+      body: JSON.stringify({ event_ids: eventIds }),
+    }),
   schoolLeaveAdminRequests: () => request<SchoolLeaveRequest[]>("/api/school-leave/admin/requests"),
   adminLeaveRecords: (filters: AdminLeaveRecordFilters = {}) => {
     const params = new URLSearchParams()
