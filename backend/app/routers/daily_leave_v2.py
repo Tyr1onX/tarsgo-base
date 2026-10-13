@@ -22,6 +22,7 @@ from ..schemas import (
     DailyLeaveWindowCreate,
     DailyLeaveWindowMemberOut,
     DailyLeaveSelfServiceCreate,
+    DailyLeaveDocumentReadyOut,
     validate_college,
     validate_member_name,
     validate_student_id,
@@ -114,6 +115,10 @@ def _document_response(content: bytes, filename: str) -> StreamingResponse:
         media_type=DOCX_MIME_TYPE,
         headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
     )
+
+
+def _document_ready(download_url: str, filename: str) -> DailyLeaveDocumentReadyOut:
+    return DailyLeaveDocumentReadyOut(download_url=download_url, filename=filename)
 
 
 def _make_document(
@@ -242,13 +247,13 @@ def close_window(
     return _admin_window_out(db, window)
 
 
-@router.post("/windows/{window_id}/document")
+@router.post("/windows/{window_id}/document", response_model=DailyLeaveDocumentReadyOut)
 def member_document(
     window_id: int,
     offline: bool = False,
     current: Member = Depends(get_current_member),
     db: Session = Depends(get_db),
-) -> StreamingResponse:
+) -> DailyLeaveDocumentReadyOut:
     window = _get_window(db, window_id, lock=True)
     _require_open(window, public=False)
     entry = db.scalar(
@@ -292,38 +297,117 @@ def member_document(
         college=entry.college_snapshot,
         offline=offline,
     )
+    filename = _daily_filename(window.start_at, offline=offline)
+    download_url = f"/api/daily-leave/windows/{window.id}/document"
+    if offline:
+        download_url += "?offline=true"
+    return _document_ready(download_url, filename)
+
+
+@router.get("/windows/{window_id}/document")
+def member_document_download(
+    window_id: int,
+    offline: bool = False,
+    current: Member = Depends(get_current_member),
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
+    window = _get_window(db, window_id)
+    entry = db.scalar(
+        select(DailyLeaveEntry).where(
+            DailyLeaveEntry.window_id == window.id,
+            DailyLeaveEntry.member_id == current.id,
+        )
+    )
+    if entry is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="请先生成该共享活动的请假材料")
+    content = _make_document(
+        start_at=window.start_at,
+        end_at=window.end_at,
+        name=entry.name_snapshot,
+        student_id=entry.student_id_snapshot,
+        college=entry.college_snapshot,
+        offline=offline,
+    )
     return _document_response(content, _daily_filename(window.start_at, offline=offline))
 
 
-@router.post("/self-service/document")
+@router.post("/self-service/document", response_model=DailyLeaveDocumentReadyOut)
 def self_service_document(
     payload: DailyLeaveSelfServiceCreate,
     offline: bool = False,
     current: Member = Depends(get_current_member),
     db: Session = Depends(get_db),
-) -> StreamingResponse:
-    name, student_id, college = _member_identity(current)
-    content = _make_document(
-        start_at=payload.start_at,
-        end_at=payload.end_at,
-        name=name,
-        student_id=student_id,
-        college=college,
+) -> DailyLeaveDocumentReadyOut:
+    # Serialize self-service upserts on the member row. This makes the following
+    # current read safe under MySQL REPEATABLE READ without a schema migration.
+    db.scalar(select(Member.id).where(Member.id == current.id).with_for_update())
+    entry = db.scalar(
+        select(DailyLeaveEntry)
+        .where(
+            DailyLeaveEntry.window_id.is_(None),
+            DailyLeaveEntry.member_id == current.id,
+            DailyLeaveEntry.start_at == payload.start_at,
+            DailyLeaveEntry.end_at == payload.end_at,
+        )
+        .with_for_update()
+    )
+    if entry is None:
+        name, student_id, college = _member_identity(current)
+        entry = DailyLeaveEntry(
+            window_id=None,
+            member_id=current.id,
+            start_at=payload.start_at,
+            end_at=payload.end_at,
+            name_snapshot=name,
+            student_id_snapshot=student_id,
+            college_snapshot=college,
+            participant_type=current.team_membership or "other",
+        )
+        db.add(entry)
+        db.flush()
+    _make_document(
+        start_at=entry.start_at or payload.start_at,
+        end_at=entry.end_at or payload.end_at,
+        name=entry.name_snapshot,
+        student_id=entry.student_id_snapshot,
+        college=entry.college_snapshot,
         offline=offline,
     )
-    entry = DailyLeaveEntry(
-        window_id=None,
-        member_id=current.id,
-        start_at=payload.start_at,
-        end_at=payload.end_at,
-        name_snapshot=name,
-        student_id_snapshot=student_id,
-        college_snapshot=college,
-        participant_type=current.team_membership or "other",
-    )
-    db.add(entry)
     db.commit()
-    return _document_response(content, _daily_filename(payload.start_at, offline=offline))
+    filename = _daily_filename(payload.start_at, offline=offline)
+    download_url = f"/api/daily-leave/self-service/document/{entry.id}"
+    if offline:
+        download_url += "?offline=true"
+    return _document_ready(download_url, filename)
+
+
+@router.get("/self-service/document/{entry_id}")
+def self_service_document_download(
+    entry_id: int,
+    offline: bool = False,
+    current: Member = Depends(get_current_member),
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
+    entry = db.scalar(
+        select(DailyLeaveEntry).where(
+            DailyLeaveEntry.id == entry_id,
+            DailyLeaveEntry.window_id.is_(None),
+            DailyLeaveEntry.member_id == current.id,
+        )
+    )
+    if entry is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="请先生成该时段的请假材料")
+    if entry.start_at is None or entry.end_at is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="该记录没有有效的请假时段")
+    content = _make_document(
+        start_at=entry.start_at,
+        end_at=entry.end_at,
+        name=entry.name_snapshot,
+        student_id=entry.student_id_snapshot,
+        college=entry.college_snapshot,
+        offline=offline,
+    )
+    return _document_response(content, _daily_filename(entry.start_at, offline=offline))
 
 
 @router.get("/public/{token}", response_model=DailyLeavePublicWindowOut)
@@ -338,13 +422,13 @@ def public_window(token: str, db: Session = Depends(get_db)) -> DailyLeavePublic
     )
 
 
-@router.post("/public/{token}/document")
+@router.post("/public/{token}/document", response_model=DailyLeaveDocumentReadyOut)
 def public_document(
     token: str,
     payload: DailyLeavePublicEntryCreate,
     offline: bool = False,
     db: Session = Depends(get_db),
-) -> StreamingResponse:
+) -> DailyLeaveDocumentReadyOut:
     window = _public_window(token, db, lock=True)
     _require_open(window, public=True)
     entry = db.scalar(
@@ -378,6 +462,37 @@ def public_document(
             )
             if entry is None:
                 raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="请稍后重新生成") from exc
+    content = _make_document(
+        start_at=window.start_at,
+        end_at=window.end_at,
+        name=entry.name_snapshot,
+        student_id=entry.student_id_snapshot,
+        college=entry.college_snapshot,
+        offline=offline,
+    )
+    filename = _daily_filename(window.start_at, offline=offline)
+    download_url = f"/api/daily-leave/public/{token}/document/{entry.id}"
+    if offline:
+        download_url += "?offline=true"
+    return _document_ready(download_url, filename)
+
+
+@router.get("/public/{token}/document/{entry_id}")
+def public_document_download(
+    token: str,
+    entry_id: int,
+    offline: bool = False,
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
+    window = _public_window(token, db)
+    entry = db.scalar(
+        select(DailyLeaveEntry).where(
+            DailyLeaveEntry.id == entry_id,
+            DailyLeaveEntry.window_id == window.id,
+        )
+    )
+    if entry is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="请先提交本人的报名信息")
     content = _make_document(
         start_at=window.start_at,
         end_at=window.end_at,

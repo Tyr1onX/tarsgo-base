@@ -141,6 +141,10 @@ onMounted(() => {
             <dt>{{ record.record_type === "generated" ? "生成记录时间" : "提交时间" }}</dt>
             <dd>{{ dateTime(record.recorded_at) }}</dd>
           </div>
+          <div v-if="record.record_type === 'generated'">
+            <dt>历史生成次数</dt>
+            <dd>{{ record.generation_count }} 次</dd>
+          </div>
           <div v-if="record.activity_title">
             <dt>{{ record.source_type === "shared_activity" ? "关联活动" : "关联旧版汇总" }}</dt>
             <dd>{{ record.activity_title }}</dd>
@@ -158,6 +162,15 @@ onMounted(() => {
             <dd>{{ summaryStatusLabel(record.summary_status) }}</dd>
           </div>
         </dl>
+        <details
+          v-if="record.record_type === 'generated' && record.generation_times.length > 1"
+          class="leave-record-generation-times"
+        >
+          <summary>查看历史生成时间（{{ record.generation_times.length }} 次）</summary>
+          <ul>
+            <li v-for="time in record.generation_times" :key="time">{{ dateTime(time) }}</li>
+          </ul>
+        </details>
       </article>
     </div>
   </section>
@@ -185,6 +198,9 @@ onMounted(() => {
 .leave-record-details div { min-width: 0; }
 .leave-record-details dt { margin-bottom: 3px; color: var(--faint); font-size: 11px; }
 .leave-record-details dd { margin: 0; color: var(--text); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+.leave-record-generation-times { margin-top: 10px; color: var(--muted); font-size: 12px; }
+.leave-record-generation-times summary { cursor: pointer; }
+.leave-record-generation-times ul { display: grid; gap: 4px; margin: 7px 0 0; padding-left: 20px; }
 @media (max-width: 680px) {
   .leave-record-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

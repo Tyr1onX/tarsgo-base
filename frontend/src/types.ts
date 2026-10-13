@@ -209,6 +209,13 @@ export interface AdminLeaveRecord {
   activity_at: string | null
   application_status: SchoolLeaveRequestStatus | null
   summary_status: SchoolLeaveRunStatus | null
+  generation_count: number
+  generation_times: string[]
+}
+
+export interface DailyLeaveDocumentReady {
+  download_url: string
+  filename: string
 }
 
 export interface AdminLeaveRecordFilters {

@@ -287,6 +287,13 @@ class AdminLeaveRecordOut(BaseModel):
     activity_at: datetime | None = None
     application_status: SchoolLeaveRequestStatus | None = None
     summary_status: SchoolLeaveRunStatus | None = None
+    generation_count: int = 1
+    generation_times: list[datetime] = Field(default_factory=list)
+
+
+class DailyLeaveDocumentReadyOut(BaseModel):
+    download_url: str
+    filename: str
 
 
 def _normalize_daily_leave_datetime(value: datetime) -> datetime:

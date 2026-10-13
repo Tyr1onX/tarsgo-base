@@ -13,6 +13,7 @@ const loading = ref(true)
 const saving = ref(false)
 const downloaded = ref(false)
 const error = ref("")
+const readyDownload = ref<{ download_url: string; filename: string } | null>(null)
 const fieldErrors = ref<Record<string, string>>({})
 const draft = ref({ name: "", student_id: "", college: "" })
 
@@ -21,18 +22,19 @@ function dateTime(value: string) {
 }
 
 function messageOf(reason: unknown) {
+  if (reason instanceof TypeError) {
+    return "网络请求未能完成。请检查网络后重试；同一报名信息会复用已有记录。"
+  }
   return reason instanceof Error ? reason.message : "操作失败"
 }
 
-function saveBlob(blob: Blob, filename: string) {
-  const url = URL.createObjectURL(blob)
+function requestNativeDownload(downloadUrl: string) {
   const anchor = document.createElement("a")
-  anchor.href = url
-  anchor.download = filename
+  anchor.href = downloadUrl
+  anchor.rel = "noopener"
   document.body.appendChild(anchor)
   anchor.click()
   anchor.remove()
-  URL.revokeObjectURL(url)
 }
 
 function setFieldError(field: string, message: string) {
@@ -62,8 +64,10 @@ async function load() {
 }
 
 async function generate(offline = false) {
+  if (saving.value) return
   error.value = ""
   fieldErrors.value = {}
+  readyDownload.value = null
   const name = draft.value.name.trim()
   const studentId = draft.value.student_id.trim()
   if (name.length < 2 || name.length > 50) setFieldError("name", "姓名长度需为 2–50 个字符")
@@ -78,7 +82,8 @@ async function generate(offline = false) {
       student_id: studentId,
       college: draft.value.college,
     }, offline)
-    saveBlob(file.blob, file.filename)
+    readyDownload.value = file
+    requestNativeDownload(file.download_url)
     downloaded.value = true
   } catch (reason) {
     if (reason instanceof ApiError && reason.field) setFieldError(reason.field, reason.message)
@@ -111,6 +116,10 @@ onMounted(load)
       <template v-if="windowInfo.accepting_participants">
         <p class="daily-public-hint">填写本人信息后即可下载个人请假条。时间固定，不能修改。</p>
         <p v-if="error" class="daily-public-error" role="alert">{{ error }}</p>
+        <p v-if="readyDownload" class="daily-public-muted" role="status">
+          材料已准备好，正在向浏览器发起文件请求。请检查下载列表或文件管理器确认保存；若未出现文件，
+          <a :href="readyDownload.download_url">点此重新下载</a>。
+        </p>
         <form @submit.prevent="generate(false)">
           <label>
             姓名
@@ -134,7 +143,7 @@ onMounted(load)
             <small v-if="fieldErrors.college" class="daily-public-error">{{ fieldErrors.college }}</small>
           </label>
           <div class="daily-public-actions">
-            <button class="primary" type="submit" :disabled="saving">{{ saving ? "正在生成…" : downloaded ? "重新下载请假条" : "生成并下载请假条" }}</button>
+            <button class="primary" type="submit" :disabled="saving">{{ saving ? "正在准备文件…" : downloaded ? "重新获取请假条" : "生成并下载请假条" }}</button>
             <ActionMenu
               id="daily-public-document"
               aria-label="其他下载选项"
@@ -144,7 +153,7 @@ onMounted(load)
             />
           </div>
         </form>
-        <p v-if="downloaded" class="daily-public-muted" role="status">请假条已生成，可按需重复下载。</p>
+        <p v-if="downloaded" class="daily-public-muted">材料已生成；再次获取不会新建报名记录。</p>
       </template>
       <p v-else class="daily-public-muted">此链接已截止或已关闭，不能继续生成材料。</p>
     </template>
