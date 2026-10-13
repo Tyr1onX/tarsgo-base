@@ -341,14 +341,24 @@ def run_workflow():
     assert reassigned["owner"]["id"] == owner_id
 
     execution_result = "主办方确认 8:30 东门集合，9:00 开始，现场提供桌椅和 220V 电源。"
-    updated_by_owner = call(
+    call(
         owner,
         f"/api/tasks/{claim_child['id']}",
         method="PATCH",
         data={"status": "doing", "result": execution_result},
+        expected=403,
     )
-    assert updated_by_owner["status"] == "doing"
-    assert updated_by_owner["result"] == execution_result
+    progress = call(
+        owner, f"/api/tasks/{claim_child['id']}/progress", method="POST",
+        data={"content": execution_result}, expected=201,
+    )
+    assert progress["task"]["status"] == "doing"
+    completed = call(
+        owner, f"/api/tasks/{claim_child['id']}/complete", method="POST",
+        data={"result": execution_result, "sync_to_item": False},
+    )
+    assert completed["task"]["result"] == execution_result
+    call(manager, f"/api/tasks/{claim_child['id']}", method="PATCH", data={"status": "doing"})
     call(
         second,
         f"/api/tasks/{claim_child['id']}",

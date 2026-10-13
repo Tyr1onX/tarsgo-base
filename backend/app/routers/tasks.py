@@ -1022,6 +1022,11 @@ def update_task(
     if not _is_admin(current):
         if task.owner_id != current.id:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="只有负责人可以更新任务状态和执行结果")
+        if task.parent_id is not None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="请通过更新进展或完成分工记录执行状态和结果",
+            )
         has_child_tasks = task.parent_id is None and db.scalar(
             select(Task.id).where(Task.parent_id == task.id).limit(1)
         ) is not None
@@ -1050,6 +1055,11 @@ def update_task(
     }
     if any(field in fields and getattr(payload, field) is None for field in required_non_null):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="任务字段不能设为空")
+
+    previous_status = task.status
+    previous_owner_id = task.owner_id
+    previous_owner_name = task.owner.name if task.owner else "待认领"
+    previous_deadline = task.deadline
 
     resulting_owner_id = payload.owner_id if "owner_id" in fields else task.owner_id
     resulting_claimable = payload.owner_claimable if "owner_claimable" in fields else task.owner_claimable
@@ -1087,6 +1097,25 @@ def update_task(
     if "status" in fields:
         root_id = task.parent_id or task.id
         sync_root_status(db, root_id)
+
+    changes = []
+    if "owner_id" in fields and previous_owner_id != task.owner_id:
+        next_owner = db.get(Member, task.owner_id) if task.owner_id is not None else None
+        changes.append(f"负责人：{previous_owner_name} → {next_owner.name if next_owner else '待认领'}")
+    if "deadline" in fields and previous_deadline != task.deadline:
+        def deadline_text(value):
+            return value.strftime("%Y-%m-%d %H:%M") if value is not None else "未设置"
+        changes.append(f"截止时间：{deadline_text(previous_deadline)} → {deadline_text(task.deadline)}")
+    if "status" in fields and previous_status != task.status:
+        labels = {"todo": "未开始", "doing": "进行中", "done": "已完成"}
+        changes.append(f"管理者纠正状态：{labels[previous_status]} → {labels[task.status]}")
+    if changes:
+        db.add(ItemActivity(
+            root_task_id=task.parent_id or task.id,
+            task_id=task.id if task.parent_id is not None else None,
+            author_id=current.id,
+            content=f"更新「{task.title}」：" + "；".join(changes) + "。",
+        ))
 
     db.commit()
     db.expire(task)

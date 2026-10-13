@@ -169,6 +169,8 @@ manager 可以将同一事项下的子任务关联为前置依赖。系统拒绝
 
 任务详情页会在浏览器重新获得焦点或重新可见时刷新，并且仅在任务详情打开期间每 60 秒轮询一次。后台刷新会保留尚未保存的结果文本。
 
+普通成员的一级分工状态与结果只能通过进展 / 完成接口修改，不能通过通用 PATCH 绕过前置依赖、完成结果与动态记录。没有子任务的独立根事项保留原有状态更新能力。管理者修改负责人、截止时间或纠正状态时会同时生成简短事项动态；实际未变化的字段不重复记录。
+
 执行相关 API 新增 `POST /api/tasks/{task_id}/progress`、`POST /api/tasks/{task_id}/complete`、`POST /api/tasks/{root_task_id}/context-facts/batch` 和 `POST /api/ai/items/{root_task_id}/extract-facts`。`TaskOut` 包含 `depends_on_tasks`、计算字段 `blocked` 与 `blocked_by`；manager 在创建 / 更新任务时通过 `depends_on_task_ids` 设置依赖。
 
 ## AI Planner
@@ -351,6 +353,8 @@ docker compose up -d --build
 只对外发布 web 容器的 HTTP 端口。FastAPI 和 MySQL 保持在 Docker 内部网络中。MySQL 数据保存在命名卷 mysql_data 中。
 
 ## 验证
+
+新增的虚构活动演练使用 8 名模拟成员和 5 项分工，覆盖并发认领、依赖阻塞、地点变更、换人交接、权限、AI 失败后的进展持久化及事项完成。CI 还会把数据库及知识原件恢复到全新的数据卷并验证内容及登录。操作说明见 [备份与恢复](docs/backup-and-restore.md)。
 
 GitHub Actions 执行：
 

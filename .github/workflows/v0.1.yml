@@ -9,6 +9,8 @@ on:
 jobs:
   validate:
     runs-on: ubuntu-latest
+    env:
+      COMPOSE_PROJECT_NAME: tarsgo-validation
     steps:
       - uses: actions/checkout@v4
 
@@ -17,6 +19,9 @@ jobs:
           MYSQL_PASSWORD="$(openssl rand -hex 18)"
           MYSQL_ROOT_PASSWORD="$(openssl rand -hex 18)"
           ADMIN_PASSWORD="$(openssl rand -hex 18)"
+          echo "::add-mask::$MYSQL_PASSWORD"
+          echo "::add-mask::$MYSQL_ROOT_PASSWORD"
+          echo "::add-mask::$ADMIN_PASSWORD"
           cat > .env <<EOF
           APP_DOMAIN=:80
           SESSION_COOKIE_SECURE=false
@@ -48,6 +53,9 @@ jobs:
           cd frontend
           npm ci
           npm run build
+
+      - name: Validate fictional AI evaluation cases
+        run: python scripts/evaluate_planner.py
 
       - name: Build and start
         run: docker compose up -d --build
@@ -201,6 +209,11 @@ jobs:
       - name: Verify shared execution scene
         run: docker compose exec -T api python -m tests.test_shared_execution
 
+      - name: Rehearse a fictional operations event
+        run: |
+          docker compose exec -T api python -m tests.test_operations_simulation
+          docker compose cp api:/app/operations-simulation-report.json operations-simulation-report.json
+
       - name: Verify scoped item information
         run: docker compose exec -T api python -m tests.test_scoped_item_information
 
@@ -255,6 +268,21 @@ jobs:
 
       - name: Verify persisted data
         run: python scripts/smoke_test.py persistence http://127.0.0.1
+
+      - name: Verify backup safety and cold restore
+        run: |
+          python scripts/test_backup.py
+          python scripts/backup_restore_test.py
+
+      - name: Save rehearsal evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: operations-validation-reports
+          path: |
+            operations-simulation-report.json
+            backup-restore-report.json
+          if-no-files-found: warn
 
       - name: Show logs on failure
         if: failure()

@@ -10,3 +10,6 @@ uploads/
 logs/
 *.db
 *.sqlite*
+operations-simulation-report.json
+backup-restore-report.json
+planner-evaluation-report.json
