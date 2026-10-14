@@ -119,10 +119,6 @@ onMounted(() => {
 
 <template>
   <section class="legacy-leave-history" aria-label="成员请假记录">
-    <p class="leave-records-note">
-      请假条记录显示成员提交的文件请求，不代表文件已成功下载或请假已获批准。正式申请状态显示申请及旧版汇总进度。
-    </p>
-
     <form class="leave-record-filters" @submit.prevent="applyFilters">
       <label>
         <span>成员姓名</span>
@@ -174,21 +170,17 @@ onMounted(() => {
           @click="markRead(record)"
         >{{ markingReadId === record.id ? "保存中…" : "标记已读" }}</button>
         <dl class="leave-record-details">
-          <div>
+          <div class="leave-record-primary-detail">
             <dt>请假时间</dt>
             <dd>{{ dateTime(record.start_at) }} 至 {{ dateTime(record.end_at) }}</dd>
           </div>
-          <div>
-            <dt>{{ record.record_type === "generated" ? "请假事项时间" : "提交时间" }}</dt>
+          <div class="leave-record-primary-detail">
+            <dt>{{ record.record_type === "generated" ? "生成时间" : "提交时间" }}</dt>
             <dd>{{ dateTime(record.recorded_at) }}</dd>
           </div>
-          <div v-if="record.record_type === 'generated'">
-            <dt>历史记录数</dt>
-            <dd>{{ record.generation_count }} 次</dd>
-          </div>
-          <div v-if="record.record_type === 'generated'">
-            <dt>文件请求留痕</dt>
-            <dd>POST 准备 {{ record.prepare_request_count }} 次；GET 文件 {{ record.download_request_count }} 次。记录请求次数，不代表下载成功。</dd>
+          <div v-if="record.record_type === 'generated' && record.generation_count > 1">
+            <dt>重复记录</dt>
+            <dd>{{ record.generation_count - 1 }} 条</dd>
           </div>
           <div v-if="record.activity_title">
             <dt>{{ record.source_type === "shared_activity" ? "关联活动" : "关联旧版汇总" }}</dt>
@@ -207,26 +199,14 @@ onMounted(() => {
             <dd>{{ summaryStatusLabel(record.summary_status) }}</dd>
           </div>
         </dl>
-        <details v-if="record.record_type === 'generated' && record.document_requests.length" class="leave-record-generation-times">
-          <summary>查看文件请求（{{ record.document_request_count }} 次）</summary>
+        <details v-if="record.record_type === 'generated' && record.document_requests.length" class="leave-record-requests">
+          <summary>查看文件请求记录</summary>
           <ul>
             <li v-for="request in record.document_requests" :key="request.id">
               {{ dateTime(request.requested_at) }} · {{ requestStageLabel(request.request_stage) }} ·
               {{ requestDescription(request.request_stage, request.request_type) }} ·
               {{ request.file_version }}{{ request.offline ? "（线下签章版）" : "" }}
             </li>
-          </ul>
-        </details>
-        <p v-else-if="record.record_type === 'generated'" class="leave-record-request-note">
-          此历史记录没有上线后的文件请求留痕，默认按已读处理。
-        </p>
-        <details
-          v-if="record.record_type === 'generated' && record.generation_times.length > 1"
-          class="leave-record-generation-times"
-        >
-          <summary>查看历史事项记录时间（{{ record.generation_times.length }} 条）</summary>
-          <ul>
-            <li v-for="(time, index) in record.generation_times" :key="`${record.id}:${index}:${time}`">{{ dateTime(time) }}</li>
           </ul>
         </details>
       </article>
@@ -236,7 +216,6 @@ onMounted(() => {
 
 <style scoped>
 .legacy-leave-history { min-width: 0; }
-.leave-records-note { margin: 0 0 14px; color: var(--muted); font-size: 12px; line-height: 1.55; }
 .leave-record-filters { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px 12px; align-items: end; margin-bottom: 14px; }
 .leave-record-filters label { display: grid; min-width: 0; gap: 5px; color: var(--muted); font-size: 12px; }
 .leave-record-filters input, .leave-record-filters select { box-sizing: border-box; width: 100%; min-width: 0; }
@@ -259,10 +238,10 @@ onMounted(() => {
 .leave-record-details div { min-width: 0; }
 .leave-record-details dt { margin-bottom: 3px; color: var(--faint); font-size: 11px; }
 .leave-record-details dd { margin: 0; color: var(--text); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
-.leave-record-generation-times { margin-top: 10px; color: var(--muted); font-size: 12px; }
-.leave-record-generation-times summary { cursor: pointer; }
-.leave-record-generation-times ul { display: grid; gap: 4px; margin: 7px 0 0; padding-left: 20px; }
-.leave-record-request-note { margin: 9px 0 0; color: var(--faint); font-size: 11px; line-height: 1.5; }
+.leave-record-details .leave-record-primary-detail dd { font-size: 13px; font-weight: 560; }
+.leave-record-requests { margin-top: 10px; color: var(--muted); font-size: 12px; }
+.leave-record-requests summary { cursor: pointer; }
+.leave-record-requests ul { display: grid; gap: 4px; margin: 7px 0 0; padding-left: 20px; }
 @media (max-width: 680px) {
   .leave-record-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
